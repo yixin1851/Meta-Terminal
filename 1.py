@@ -3,9 +3,11 @@ import json
 import os
 import serial
 import serial.tools.list_ports
+from serial_worker import SerialWorker
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
+
 
 # --- 样式常量 ---
 STYLE_DARK = """
@@ -103,16 +105,11 @@ class MainWindow(QMainWindow):
         self.setWindowFlags(Qt.FramelessWindowHint)
         # self.setWindowTitle("YOD")
         self.resize(1100, 750)
-        self.serial_port = None
         self.config_file = "config.json"
 
         self.setup_ui()
         self.load_config()
         self.setStyleSheet(STYLE_DARK)
-
-        # 串口接收计时器
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.read_serial)
 
     def setup_ui(self):
         # 1. 中央容器
@@ -214,6 +211,12 @@ class MainWindow(QMainWindow):
         self.right_panel = AnimatedPanel(self, 280, "right")
         self.init_right_panel()
 
+        self.serial_worker = SerialWorker()
+        self.serial_worker.data_received.connect(self.on_data_received)
+        self.serial_worker.error.connect(self.on_serial_error)
+
+        self.combo_port.currentIndexChanged.connect(self.on_port_changed)
+
     def toggle_max_restore(self):
         if self.isMaximized():
             self.showNormal()
@@ -240,8 +243,8 @@ class MainWindow(QMainWindow):
         self.refresh_ports()
 
         self.combo_baud = QComboBox()
-        self.combo_baud.addItems(["9600", "115200", "921600"])
-        self.combo_baud.setCurrentText("115200")
+        self.combo_baud.addItems(["1200","2400","4800","9600", "19200","38400", "57600","115200", "921600"])
+        self.combo_baud.setCurrentText("19200")
 
         self.btn_connect = QPushButton("打开串口")
         self.btn_connect.clicked.connect(self.toggle_serial)
@@ -277,44 +280,60 @@ class MainWindow(QMainWindow):
             self.move(self.x() + delta.x(), self.y() + delta.y())
             self.drag_pos = event.globalPosition().toPoint()
 
+    def sync_ui_state(self):
+        is_open = self.serial_worker.running
+        self.btn_connect.setText("关闭串口" if is_open else "打开串口")
+        self.combo_port.setEnabled(not is_open)
+        self.combo_baud.setEnabled(not is_open)
+
 
     # --- 逻辑实现 ---
 
     def refresh_ports(self):
         self.combo_port.clear()
-        ports = [p.device for p in serial.tools.list_ports.comports()]
-        self.combo_port.addItems(ports)
+        ports = serial.tools.list_ports.comports()
+        for p in ports:
+            text = f"{p.device} - {p.description}"
+            self.combo_port.addItem(text, p.device)
 
     def toggle_serial(self):
-        if self.serial_port and self.serial_port.is_open:
-            self.serial_port.close()
-            self.btn_connect.setText("打开串口")
-            self.timer.stop()
+        if self.serial_worker.running:
+            self.serial_worker.close()
         else:
-            try:
-                self.serial_port = serial.Serial(
-                    self.combo_port.currentText(),
-                    int(self.combo_baud.currentText()),
-                    timeout=0.1
-                )
-                self.btn_connect.setText("关闭串口")
-                self.timer.start(10)  # 10ms轮询
-                self.save_config()
-            except Exception as e:
-                QMessageBox.critical(self, "错误", str(e))
+            port = self.combo_port.currentData()
+            baud = int(self.combo_baud.currentText())
+            if not port:
+                QMessageBox.warning(self, "错误", "未选择串口")
+                return
+            self.serial_worker.open(port, baud)
+
+        self.sync_ui_state()
+        self.save_config()
+
+    # def write_serial(self, data):
+    #     self.serial_worker.send(data)
 
     def write_serial(self, data):
-        if self.serial_port and self.serial_port.is_open:
-            self.serial_port.write(data)
-
-    def read_serial(self):
-        if self.serial_port and self.serial_port.in_waiting > 0:
-            data = self.serial_port.read(self.serial_port.in_waiting)
+        if self.cb_hex.isChecked():
             try:
-                self.terminal.insertPlainText(data.decode('utf-8'))
+                data = bytes.fromhex(self.input_line.text())
             except:
-                self.terminal.insertPlainText(str(data))
-            self.terminal.moveCursor(QTextCursor.End)
+                QMessageBox.warning(self, "错误", "Hex格式错误")
+                return
+        self.serial_worker.send(data)
+
+    def on_data_received(self, data):
+        try:
+            text = data.decode('utf-8')
+        except:
+            text = str(data)
+
+        self.terminal.insertPlainText(text)
+        self.terminal.moveCursor(QTextCursor.End)
+
+    def on_serial_error(self, msg):
+        QMessageBox.critical(self, "串口错误", msg)
+        self.sync_ui_state()
 
     def run_custom_script(self):
         """Python 脚本支持"""
@@ -360,7 +379,18 @@ class MainWindow(QMainWindow):
             with open(self.config_file, "r") as f:
                 config = json.load(f)
                 self.combo_port.setCurrentText(config.get("port", ""))
-                self.combo_baud.setCurrentText(config.get("baud", "115200"))
+                self.combo_baud.setCurrentText(config.get("baud", "19200"))
+
+    def on_port_changed(self):
+        if self.serial_worker.running:
+            self.serial_worker.close()
+
+            port = self.combo_port.currentData()
+            baud = int(self.combo_baud.currentText())
+
+            self.serial_worker.open(port, baud)
+
+        self.sync_ui_state()
 
 
 if __name__ == "__main__":
