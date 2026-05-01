@@ -146,7 +146,7 @@ class MainWindow(QMainWindow):
         self.btn_left_toggle.setObjectName("IconButton")
         self.btn_left_toggle.clicked.connect(lambda: self.left_panel.toggle())
 
-        title_label = QLabel("X-SERIAL TERMINAL")
+        title_label = QLabel("YOD TERMINAL")
         title_label.setStyleSheet("font-weight: bold; color: #007ACC;")
 
         self.btn_script = QPushButton("Python 脚本")
@@ -159,6 +159,15 @@ class MainWindow(QMainWindow):
         self.btn_min = QPushButton("—")
         self.btn_max = QPushButton("□")
         self.btn_close = QPushButton("✕")
+
+        self.btn_close.setStyleSheet("""
+        QPushButton {
+            color: white;
+        }
+        QPushButton:hover {
+            background-color: red;
+        }
+        """)
 
         self.btn_min.clicked.connect(self.showMinimized)
         self.btn_max.clicked.connect(self.toggle_max_restore)
