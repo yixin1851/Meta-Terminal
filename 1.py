@@ -106,7 +106,7 @@ class TerminalView(QPlainTextEdit):
 
     def __init__(self):
         super().__init__()
-        self.setPlaceholderText("Connected... 终端显示已优化")
+        self.setPlaceholderText("终端按键输入不完美，慎用！")
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
 
         # 1. 字体与外观（使用等宽字体是基础）
@@ -200,10 +200,39 @@ class MainWindow(QMainWindow):
         # self.setWindowTitle("YOD")
         self.resize(1100, 750)
         self.config_file = "config/config.json"
+        self._last_ports = [] #  关键：缓存上一次端口
 
         self.setup_ui()
         self.load_config()
         self.setStyleSheet(STYLE_DARK)
+
+        self.start_port_monitor()  #  启动监听
+
+    def start_port_monitor(self):
+        self.port_timer = QTimer(self)
+        self.port_timer.timeout.connect(self.check_ports)
+        self.port_timer.start(1500)  # 1.5秒
+
+    def check_ports(self):
+        ports = serial.tools.list_ports.comports()
+        current = [p.device for p in ports]
+
+        # 没变化就不刷新（避免UI闪烁）
+        if current == self._last_ports:
+            return
+
+        self._last_ports = current
+        self.refresh_ports()
+
+        # UX提示（可选）
+        self.statusBar().showMessage("串口设备已更新", 2000)
+
+        # ⭐ 如果当前串口被拔掉
+        if self.serial_worker.is_open():
+            if self.serial_worker.serial_port.port not in current:
+                self.serial_worker.close()
+                self.sync_ui_state()
+                self.statusBar().showMessage("设备已断开", 3000)
 
     def setup_ui(self):
         # 1. 中央容器
@@ -373,7 +402,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("停止位:"))
         layout.addWidget(self.combo_stopbits)
 
-        layout.addWidget(self.btn_connect)
+        # layout.addWidget(self.btn_connect)
 
         # 建议放在“串口设置”按钮上方或“快捷指令”下方
         self.cb_local_echo = QCheckBox("本地回显 (Local Echo)")
@@ -509,10 +538,12 @@ class MainWindow(QMainWindow):
 
         # 1. 执行发送
         if self.serial_worker.running:
-            success = self.serial_worker.send(send_bytes)
+            # success = self.serial_worker.send(send_bytes)
+            # 使用我们新写的异步发送方法
+            self.serial_worker.send_async(send_bytes)
 
             # 2. 如果发送成功且开启了本地回显，则将其显示在终端
-            if success and self.cb_local_echo.isChecked():
+            if self.cb_local_echo.isChecked():
                 # 为了区分是“发的”还是“收的”，可以加个颜色，或者直接调用显示函数
                 self.on_data_received(send_bytes, is_send=True)
 
@@ -555,14 +586,26 @@ class MainWindow(QMainWindow):
         # 强制界面立即滚动（处理长数据流）
         self.terminal.ensureCursorVisible()
 
+    def write_to_serial(self, data: bytes):
+        """全局统一发送接口"""
+        if self.serial_worker and self.serial_worker.is_open():
+            # 这里直接调用 worker 的封装
+            self.serial_worker.send(data)
+
+            # 处理本地回显逻辑
+            if self.cb_local_echo.isChecked():
+                self.on_data_received(data, is_send=True)
+
     def on_serial_error(self, msg):
-        QMessageBox.critical(self, "串口错误", msg)
+        # # 只提示一次 + 状态同步
+        QMessageBox.critical(self, "设备已断开", msg)
+        self.serial_worker.close()
         self.sync_ui_state()
 
     def run_custom_script(self):
         """Python 脚本支持"""
         script, ok = QInputDialog.getMultiLineText(self, "运行 Python 脚本", "输入脚本 (使用 'send(bytes)')",
-                                                   "import time\nfor i in range(5):\n    send(b'Hello\\r\\n')\n    time.sleep(0.5)")
+                                                   "import time\nfor i in range(5):\n    send(b'set_lux 1000\\r\\n')\n    time.sleep(1)\n    send(b'set_lux 10000\\r\\n')\n")
         if ok and script:
             try:
                 # 注入 API 环境
@@ -619,10 +662,18 @@ class MainWindow(QMainWindow):
         if self.serial_worker.running:
             self.serial_worker.close()
 
-            port = self.combo_port.currentData()
-            baud = int(self.combo_baud.currentText())
+            cfg = self.get_serial_config()
 
-            self.serial_worker.open(port, baud)
+            try:
+                self.serial_worker.open(
+                    port=cfg["port"],
+                    baud=cfg["baud"],
+                    bytesize=cfg["bytesize"],
+                    parity=cfg["parity"],
+                    stopbits=cfg["stopbits"]
+                )
+            except Exception as e:
+                QMessageBox.critical(self, "串口错误", str(e))
 
         self.sync_ui_state()
 
