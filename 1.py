@@ -8,7 +8,7 @@ from core.serial_worker import SerialWorker
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
-
+from protocol import LineProtocol
 
 # --- 样式常量 ---
 STYLE_DARK = """
@@ -119,9 +119,9 @@ class TerminalView(QPlainTextEdit):
         self._apply_compact_format()
 
         # 3. 强力 ANSI 过滤正则：匹配所有 ESC [ 开头的序列
-        self.ansi_escape = re.compile(
-            r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])'
-        )
+        # self.ansi_escape = re.compile(
+        #     r'\x09(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])'
+        # )
 
     def _apply_compact_format(self):
         block_format = QTextBlockFormat()
@@ -144,14 +144,20 @@ class TerminalView(QPlainTextEdit):
         mapping = {
             Qt.Key_Up: b'\x1b[A',
             Qt.Key_Down: b'\x1b[B',
-            Qt.Key_Right: b'\x1b[C',
-            Qt.Key_Left: b'\x1b[D',
+            # Qt.Key_Right: b'\x1b[C',
+            # Qt.Key_Left: b'\x1b[D',
             # 尝试更改为 \x7f 如果 \x08 无效
             Qt.Key_Backspace: b'\x08',
             Qt.Key_Delete: b'\x1b[3~',
         }
 
         if key in mapping:
+            if key == Qt.Key_Backspace:
+                cursor = self.textCursor()
+                if cursor.position() > 0:
+                    cursor.deletePreviousChar()
+                    self.setTextCursor(cursor)
+
             self.send_data.emit(mapping[key])
             return
 
@@ -167,30 +173,25 @@ class TerminalView(QPlainTextEdit):
 
         super().keyPressEvent(event)
 
-    def insert_text(self, text):
-        cursor = self.textCursor()
-        # cursor.movePosition(QTextCursor.End)  # 必须保证在末尾
-
-        # 将文本转为字符流处理，而不是整体 replace
-        for char in text:
-            if char == '\x08':  # 退格控制符
-                if not cursor.atBlockStart():
-                    cursor.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor)
-                    # 注意：这里只移动光标不删除，等待后面的空格来擦除，或者直接 delete
-                    cursor.deletePreviousChar()
-            elif char == '\r':
-                continue  # 忽略 \r，只靠 \n 换行
-            elif char == '\n':
-                cursor.insertText('\n')
-            else:
-                # 只有可打印字符才插入
-                if ord(char) >= 32:
-                    # 如果当前位置已经有字符（比如回显覆盖），先删再插
-                    # 这种简单的逻辑足以应付 msh 的基本交互
-                    cursor.insertText(char)
-
-        self.setTextCursor(cursor)
-        self.ensureCursorVisible()
+    # def insert_text(self, text):
+    #     cursor = self.textCursor()
+    #     # cursor.movePosition(QTextCursor.End)  # 必须保证在末尾
+    #
+    #     # 将文本转为字符流处理，而不是整体 replace
+    #     for char in text:
+    #         if char == '\r':
+    #             continue  # 忽略 \r，只靠 \n 换行
+    #         elif char == '\n':
+    #             cursor.insertText('\n')
+    #         else:
+    #             # 只有可打印字符才插入
+    #             if ord(char) >= 32:
+    #                 # 如果当前位置已经有字符（比如回显覆盖），先删再插
+    #                 # 这种简单的逻辑足以应付 msh 的基本交互
+    #                 cursor.insertText(char)
+    #
+    #     self.setTextCursor(cursor)
+    #     self.ensureCursorVisible()
 
 
 class MainWindow(QMainWindow):
@@ -207,6 +208,8 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(STYLE_DARK)
 
         self.start_port_monitor()  #  启动监听
+
+        self.protocol = LineProtocol()  # 实例化协议处理器
 
     def start_port_monitor(self):
         self.port_timer = QTimer(self)
@@ -548,43 +551,34 @@ class MainWindow(QMainWindow):
                 self.on_data_received(send_bytes, is_send=True)
 
     def on_data_received(self, data, is_send=False):
+        mode = "hex" if self.cb_hex.isChecked() else "text"
+
         try:
-            if self.cb_hex.isChecked():
-                # Hex 模式保持原样，加空格区分
-                text = data.hex(' ').upper() + " "
-            else:
-                # --- 核心修复逻辑 ---
-                # 1. 解码并忽略非法字符
-                # 2. 将 \r\n 替换为 \n (防止重复换行)
-                # 3. 将残余的 \r 彻底删掉 (这是导致多出一行的元凶)
-                text = data.decode('utf-8', errors='ignore').replace('\r\n', '\n').replace('\r', '')
+            results = self.protocol.feed(data, mode=mode)
+
+            cursor = self.terminal.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            self.terminal.setTextCursor(cursor)
+
+            if is_send:
+                fmt = QTextCharFormat()
+                fmt.setForeground(QColor("#569CD6"))
+                self.terminal.setCurrentCharFormat(fmt)
+                self.terminal.setCurrentCharFormat(QTextCharFormat())
+
+            for packet in results:
+                if mode == "hex":
+                    self.terminal.insertPlainText(packet["hex"] + " ")
+                elif packet["mode"] == "text_stream" :
+                    # 现在的 packet["render"] 可能是单个字符，也可能是带换行的字符串
+                    # 无论哪种，insertPlainText 都会立即渲染，实现实时回显
+                    self.terminal.insertPlainText(packet["render"])
+                    # text = packet["render"].replace("\r", "") #防止回车，出现无效的换行回车
+                    # self.terminal.insertPlainText(text)
+            self.terminal.ensureCursorVisible()
+
         except Exception as e:
-            # 遇到不确定的事实，必须回答“我不知道”，此处仅打印错误以供调试
-            print(f"Decode error: {e}")
-            text = str(data)
-
-        # 确保操作在末尾进行
-        self.terminal.moveCursor(QTextCursor.End)
-
-        if is_send:
-            # 本地回显颜色设置
-            fmt = QTextCharFormat()
-            fmt.setForeground(QColor("#569CD6"))  # 蓝色
-            # 针对本地发送，也需要确保格式紧凑
-            fmt.setLineHeight(100.0, QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
-
-            self.terminal.setCurrentCharFormat(fmt)
-            self.terminal.insertPlainText(text)
-            # 恢复默认颜色和格式
-            self.terminal.setCurrentCharFormat(QTextCharFormat())
-        else:
-            # 接收数据：直接插入清洗后的文本
-            self.terminal.insertPlainText(text)
-
-        # 保持滚动条在最下方
-        self.terminal.moveCursor(QTextCursor.End)
-        # 强制界面立即滚动（处理长数据流）
-        self.terminal.ensureCursorVisible()
+            print(f"UI渲染异常: {e}")
 
     def write_to_serial(self, data: bytes):
         """全局统一发送接口"""

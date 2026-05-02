@@ -5,6 +5,7 @@ import serial.tools.list_ports
 from PySide6.QtCore import QThread, Signal, QTimer, Slot
 
 
+
 class SerialWorker(QThread):
     data_received = Signal(bytes)
     error = Signal(str)
@@ -20,7 +21,6 @@ class SerialWorker(QThread):
         # 2. 关键：将信号连接到实际执行发送的方法
         # QueuedConnection 确保 send 会在 SerialWorker 的子线程中执行
         self._internal_send_request.connect(self._do_send)
-
 
 
     def _parse_parity(self, p):
