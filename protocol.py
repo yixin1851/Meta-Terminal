@@ -108,10 +108,10 @@ class LineProtocol:
             clean = self._ui_filter(chunk)
 
             outputs.append({
-                "render": clean,
-                "mode": "text_line",
-                "eol": True,
-                "raw": chunk   # ⭐关键：原始数据也保留
+                "data": clean,
+                "mode": "data_line",
+                "eol": True
+                # "raw": chunk   # ⭐关键：原始数据也保留
             })
 
         return outputs
