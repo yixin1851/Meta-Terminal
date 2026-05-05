@@ -10,6 +10,7 @@ from PySide6.QtCore import *
 from PySide6.QtGui import *
 from protocol import LineProtocol
 from calib_thread import CalibrationThread # 导入新线程
+from CL500_thread import IlluminanceWorker
 
 # --- 样式常量 ---
 STYLE_DARK = """
@@ -52,38 +53,47 @@ class AnimatedPanel(QFrame):
         self.setObjectName("SidePanel")
         self.panel_width = width
         self.direction = direction
-        self.setFixedWidth(width)
         self.is_expanded = False
 
-        self.animation = QPropertyAnimation(self, b"pos")
-        self.animation.setDuration(300)
-        self.animation.setEasingCurve(QEasingCurve.OutQuint)
+        self.setFixedWidth(0)
+        self.setVisible(False)  # 初始隐藏，防止占位残留
 
-    def hide_instantly(self):
-        """完全隐藏，只留1像素感应区"""
-        parent_w = self.parent().width() if self.parent() else 1100
-        y_pos = self.y()
-        # 这里关键：隐藏时要躲到视线外
-        x_pos = -self.panel_width if self.direction == "left" else parent_w
-        self.move(x_pos, y_pos)
-        self.is_expanded = False
+        self.animation = QPropertyAnimation(self, b"minimumWidth")
+        self.animation.setDuration(200)  # 缩短时间能显著减少视觉残留
+        self.animation.setEasingCurve(QEasingCurve.OutCubic)
+
+        # 核心：动画结束后的清理工作
+        self.animation.finished.connect(self._on_animation_finished)
 
     def toggle(self):
-        parent_w = self.parent().width()
-        y_pos = self.y()
         self.animation.stop()
 
-        if self.is_expanded:
-            # 缩回逻辑：完全出界
-            end_x = -self.panel_width if self.direction == "left" else parent_w
+        if not self.is_expanded:
+            # --- 展开动作 ---
+            # 1. 先显示面板
+            self.setVisible(True)
+            # 2. 设置目标宽度
+            end_val = self.panel_width
         else:
-            # 展开逻辑
-            end_x = 0 if self.direction == "left" else parent_w - self.panel_width
+            # --- 收缩动作 ---
+            # 1. 关键：收缩时立即隐藏内部子控件，防止它们干扰边缘渲染
+            # 如果你不想逐个隐藏，可以直接在动画结束前关闭绘制
+            end_val = 0
 
-        self.animation.setStartValue(self.pos())
-        self.animation.setEndValue(QPoint(end_x, y_pos))
+        self.animation.setEndValue(end_val)
         self.animation.start()
         self.is_expanded = not self.is_expanded
+
+    def _on_animation_finished(self):
+        """动画结束后的回调"""
+        if not self.is_expanded:
+            self.setVisible(False)
+        else:
+            # 展开完成后，确保面板是完全可见的
+            self.setVisible(True)
+
+    def _sync_max_width(self, val):
+        self.setMaximumWidth(val)
 
 
 
@@ -251,7 +261,26 @@ class MainWindow(QMainWindow):
 
         self.protocol = LineProtocol()  # 实例化协议处理器
 
+        self._setup_workers()
         # self._waiting_for_echo = False
+
+    def _setup_workers(self):
+
+        if getattr(sys, 'frozen', False):
+            # 如果是打包后的环境
+            BASE_DIR = os.path.dirname(sys.executable)
+        else:
+            # 如果是源代码运行环境
+            BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+        # 拼接驱动目录的相对路径
+        # 这样无论你把 py_serial 文件夹整体挪到哪个盘，都能自动找到驱动
+        DLL_RELATIVE_PATH = os.path.join(BASE_DIR, "CL500A", "bin")
+
+        # 使用动态生成的 DLL 路径
+        self.cl500_worker = IlluminanceWorker(DLL_RELATIVE_PATH)
+        # 启动初始化（在后台线程或通过信号触发）
+        self.cl500_worker.init_sdk()
 
     def eventFilter(self, watched, event):
         # 监控所有的键盘按下事件
@@ -398,9 +427,9 @@ class MainWindow(QMainWindow):
         self.main_layout.addWidget(self.top_menu)
 
         # 3. 中间核心区 (终端)
-        self.terminal = TerminalView()
-        self.terminal.send_data.connect(self.write_serial)
-        self.main_layout.addWidget(self.terminal)
+        # self.terminal = TerminalView()
+        # self.terminal.send_data.connect(self.write_serial)
+        # self.main_layout.addWidget(self.terminal)
 
         # 4. 底部发送栏 (SSCOM 风格)
         self.bottom_bar = QFrame()
@@ -418,14 +447,37 @@ class MainWindow(QMainWindow):
         self.bottom_layout.addWidget(self.input_line)
         self.bottom_layout.addWidget(self.cb_hex)
         self.bottom_layout.addWidget(self.btn_send)
-        self.main_layout.addWidget(self.bottom_bar)
+        # self.main_layout.addWidget(self.bottom_bar)
 
-        # 5. 悬浮侧边栏 (后创建以保证在顶层)
+        # --- 核心修改：中间水平区域 ---
+        self.middle_area = QWidget()
+        self.middle_layout = QHBoxLayout(self.middle_area)
+        self.middle_layout.setContentsMargins(0, 0, 0, 0)
+        self.middle_layout.setSpacing(0)
+
+        # 左侧面板：现在它是布局的一员，不再悬浮
         self.left_panel = AnimatedPanel(self, 220, "left")
         self.init_left_panel()
 
-        self.right_panel = AnimatedPanel(self, 280, "right")
+        # 中间终端：被左侧挤压
+        self.terminal = TerminalView()
+        self.terminal.send_data.connect(self.write_serial)
+
+        # 创建右侧面板 (现在它也是布局的一员了)
+        self.right_panel = AnimatedPanel(self, 220, "right")
         self.init_right_panel()
+
+        # 按顺序添加：[左] [中] [右]
+        self.middle_layout.addWidget(self.left_panel)
+        self.middle_layout.addWidget(self.terminal)
+        self.middle_layout.addWidget(self.right_panel)
+
+        self.main_layout.addWidget(self.middle_area)
+        # -----------------------------
+
+        # 4. 底部发送栏 (保持不变)
+        # ... (此处省略 bottom_bar 的创建代码) ...
+        self.main_layout.addWidget(self.bottom_bar)
 
         self.serial_worker = SerialWorker()
         self.serial_worker.data_received.connect(self.on_data_received)
@@ -444,7 +496,7 @@ class MainWindow(QMainWindow):
 
     def init_left_panel(self):
         layout = QVBoxLayout(self.left_panel)
-        layout.addWidget(QLabel("会话管理器"))
+        layout.addWidget(QLabel("自定义命令区"))
         self.session_list = QListWidget()
         self.session_list.addItem("Default Session")
         self.session_list.setStyleSheet("background: transparent; border: none; color: white;")
@@ -668,7 +720,7 @@ class MainWindow(QMainWindow):
     def finalize_ui_unlock(self):
         """回显成功后，真正根据模式逻辑解锁 UI 并变亮"""
         current_mode = self.combo_calib_mode.currentText()
-        placeholder_modes = ["CL500", "DN", "Other"]
+        placeholder_modes = ["DN", "Other"]
         is_placeholder = current_mode in placeholder_modes
 
         # 1. 基础组件解锁
@@ -994,35 +1046,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "脚本错误", str(e))
 
     def resizeEvent(self, event):
-        # 1. 基础尺寸计算
-        menu_h = self.top_menu.height()
-        bar_h = self.bottom_bar.height()  # 如果底部也有栏，记得减去
-        panel_h = self.height() - menu_h - bar_h
-        win_w = self.width()
-
-        self.left_panel.setFixedHeight(panel_h)
-        self.right_panel.setFixedHeight(panel_h)
-
-        # 2. 修正 Y 坐标
-        self.left_panel.move(self.left_panel.x(), menu_h)
-        # 注意：右侧面板在 resize 时必须重新计算 X，否则会悬浮在屏幕中间
-
-        # 3. 处理右侧面板的 X 坐标对齐
-        if self.right_panel.is_expanded:
-            # 展开状态：贴着右边缘
-            rx = win_w - self.right_panel.width()
-        else:
-            # 隐藏状态：完全躲在右边缘外
-            rx = win_w
-
-        self.right_panel.move(rx, menu_h)
-
-        # 4. 处理左侧面板（左侧 X 坐标通常为 0 或 -width，相对简单）
-        if not self.left_panel.is_expanded:
-            self.left_panel.move(-self.left_panel.width(), menu_h)
-        else:
-            self.left_panel.move(0, menu_h)
-
+        # 左右面板的高度现在由 middle_layout 自动管理，无需手动设置
         super().resizeEvent(event)
 
     def save_config(self):

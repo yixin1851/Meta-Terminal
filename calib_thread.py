@@ -57,7 +57,7 @@ class CalibrationThread(QThread):
     finished_signal = Signal(str)
     log_signal = Signal(str)
 
-    def __init__(self, mode, values, serial_worker):
+    def __init__(self, mode, values, serial_worker, sdk_workers=None):
         super().__init__()
         self.mode = mode
         self.values = values  # 目标 lux 列表 (B值)
@@ -67,6 +67,11 @@ class CalibrationThread(QThread):
         # 读取cat文件
         self._is_collecting_file = False  # 控制开关
         self._file_buffer = ""  # 原始数据缓存
+        self.sdk_workers = sdk_workers or {}  # 存放各家 SDK 实例
+        """
+        :param sdk_workers: 字典形式，例如 {"CL500": cl500_worker, "DN": dn_worker}
+        """
+
 
     def parse_and_organize_configs(self, raw_text):
         """
@@ -180,16 +185,24 @@ class CalibrationThread(QThread):
         """
         对接 Konica Minolta CL-500A 照度计的 SDK
         """
-        try:
-            self.log_signal.emit("正在通过 SDK 读取 CL500A 照度数据...")
-            # 真实逻辑示例：
-            # 1. 检查 SDK 对象是否初始化
-            # 2. 调用 SDK 的测量方法：self.cl500.measure()
-            # 3. 获取勒克斯值：val = self.cl500.get_illuminance()
-            # return float(val)
+        worker = self.sdk_workers.get("CL500")
+        if not worker or not worker.is_initialized:
+            self.log_signal.emit("错误：CL500 SDK 未初始化或实例不存在")
+            return None
 
-            # 暂时返回模拟值用于测试
-            return 0.0
+        try:
+            # 由于我们已经在校准线程（子线程）中，
+            # 如果 SDK Worker 也在它自己的线程，我们这里需要同步获取结果。
+            # 简单做法是直接调用 worker 的测量方法（如果该方法是线程安全的）
+            # 或者通过信号槽等待。为了逻辑简单，这里演示直接调用：
+
+            self.log_signal.emit("正在通过 SDK 读取 CL500A 数据...")
+
+            # 注意：此处应确保 worker.start_measure() 不会弹出 UI，
+            # 并且能直接返回或通过变量更新结果。
+            # 建议在 IlluminanceWorker 中增加一个同步测量方法：
+            lux, tcp = worker.sync_measure()
+            return lux
         except Exception as e:
             self.log_signal.emit(f"CL500 SDK 读取异常: {e}")
             return None
@@ -331,6 +344,50 @@ class CalibrationThread(QThread):
 
         return False, f"微调结束，未能将 {self.mode} 数值调整至目标的 1% 误差内", None
 
+    def get_u_disk_path(self, target_keyword="YOD"):
+        """
+        终极扫描方案：同时匹配卷标 (Label) 和 硬件设备名称 (Device Name)
+        """
+        import psutil
+        import ctypes
+        import wmi  # 新增依赖
+
+        # --- 方法 A: 扫描卷标 (Label) ---
+        partitions = psutil.disk_partitions()
+        for p in partitions:
+            if 'cdrom' in p.opts or p.fstype == "":
+                continue
+            try:
+                path = p.device
+                volumeNameBuffer = ctypes.create_unicode_buffer(1024)
+                ctypes.windll.kernel32.GetVolumeInformationW(
+                    ctypes.c_wchar_p(path),
+                    volumeNameBuffer, ctypes.sizeof(volumeNameBuffer),
+                    None, None, None, None, 0
+                )
+                if target_keyword.upper() in volumeNameBuffer.value.upper():
+                    return path
+            except:
+                continue
+
+        # --- 方法 B: 扫描硬件名称 (匹配截图 image_10e83a.png 中的 YOD USB Disk) ---
+        try:
+            c = wmi.WMI()
+            # 寻找硬件描述中包含关键字的物理磁盘
+            for drive in c.Win32_DiskDrive():
+                if target_keyword.upper() in drive.Caption.upper() or \
+                        target_keyword.upper() in drive.Model.upper():
+
+                    # 找到物理磁盘后，需要关联到逻辑盘符 (如 G:)
+                    for partition in drive.associators("Win32_DiskDriveToDiskPartition"):
+                        for logical_disk in partition.associators("Win32_LogicalDiskToPartition"):
+                            # 返回盘符 (需加上斜杠确保 os.path.join 正确)
+                            return logical_disk.DeviceID + "\\"
+        except Exception as e:
+            self.log_signal.emit(f"WMI 硬件扫描异常: {e}")
+
+        return None
+
     def run(self):
         try:
             # 1 & 2. 获取并截取数据 (保持原有逻辑)
@@ -399,32 +456,60 @@ class CalibrationThread(QThread):
 
             # --- 第五阶段：统一写入本地文件 ---
             # 修正逻辑：只有当 any_changed 为 True 时才写入文件
-            if any_changed:
+            if not any_changed:
                 import os
                 import json
                 from datetime import datetime
+                import shutil  # 用于文件复制
 
-                file_name = "yod_calib.jsonl"
+                # 1. 路径初始化
+                u_disk_path = self.get_u_disk_path("YOD")
+                local_root = os.getcwd()  # 程序根目录
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+                local_file_path = os.path.join(local_root, "yod_calib.jsonl")
+
                 try:
-                    # 1. 备份旧配置
-                    if os.path.exists(file_name):
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        backup_name = f"yod_calib_{timestamp}.jsonl"
-                        os.rename(file_name, backup_name)
-                        self.log_signal.emit(f"📦 数据已变动，备份旧配置为: {backup_name}")
+                    # --- 第一步：处理本地文件的备份 ---
+                    if os.path.exists(local_file_path):
+                        local_backup = os.path.join(local_root, f"yod_calib_{timestamp}.jsonl")
+                        os.rename(local_file_path, local_backup)
+                        self.log_signal.emit(f"📦 本地既有文件已备份: {os.path.basename(local_backup)}")
 
-                    # 2. 写入新配置
-                    with open(file_name, "w", encoding="utf-8") as f:
-                        # 按 lux 大小排序写入，确保文件整齐
-                        sorted_keys = sorted(organized_data.keys(), key=lambda x: float(x))
-                        for k in sorted_keys:
-                            line = json.dumps(organized_data[k], ensure_ascii=False)
-                            f.write(line + "\n")
+                    # --- 第二步：处理 U 盘逻辑 ---
+                    if u_disk_path:
+                        u_file_path = os.path.join(u_disk_path, "yod_calib.jsonl")
 
-                    self.log_signal.emit(f"💾 [成功] 新配置已写入 {file_name}")
+                        # 如果 U 盘里也有老文件，先在 U 盘备份
+                        if os.path.exists(u_file_path):
+                            u_backup = os.path.join(u_disk_path, f"yod_calib_{timestamp}.jsonl")
+                            os.rename(u_file_path, u_backup)
+                            self.log_signal.emit(f"📦 U 盘既有文件已备份: {os.path.basename(u_backup)}")
+
+                        # 将新数据写入 U 盘
+                        with open(u_file_path, "w", encoding="utf-8") as f:
+                            sorted_keys = sorted(organized_data.keys(), key=lambda x: float(x))
+                            for k in sorted_keys:
+                                line = json.dumps(organized_data[k], ensure_ascii=False)
+                                f.write(line + "\n")
+                        self.log_signal.emit(f"💾 新配置已成功写入 U 盘: {u_file_path}")
+
+                        # 从 U 盘同步回本地
+                        shutil.copy2(u_file_path, local_file_path)
+                        self.log_signal.emit(f"🚀 已从 U 盘同步更新至本地根目录")
+
+                    else:
+                        # 如果没插 U 盘，则直接写入本地
+                        self.log_signal.emit("⚠️ 未检测到 U 盘，直接更新本地配置文件")
+                        with open(local_file_path, "w", encoding="utf-8") as f:
+                            sorted_keys = sorted(organized_data.keys(), key=lambda x: float(x))
+                            for k in sorted_keys:
+                                line = json.dumps(organized_data[k], ensure_ascii=False)
+                                f.write(line + "\n")
+                        self.log_signal.emit(f"💾 新配置已写入本地: {local_file_path}")
 
                 except Exception as e:
-                    self.log_signal.emit(f"⚠️ [错误] 文件操作失败: {str(e)}")
+                    self.log_signal.emit(f"⚠️ [错误] 流程执行失败: {str(e)}")
             else:
                 self.log_signal.emit("ℹ️ [信息] 所有点位均在范围内，配置文件未做改动")
 
