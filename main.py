@@ -4,13 +4,14 @@ import os
 import re
 import serial
 import serial.tools.list_ports
-from core.serial_worker import SerialWorker
+from serial_worker import SerialWorker
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
 from protocol import LineProtocol
 from calib_thread import CalibrationThread # 导入新线程
 from CL500_thread import IlluminanceWorker
+from sub_ui import AnimatedPanel,MultiSendPanel
 
 # --- 样式常量 ---
 STYLE_DARK = """
@@ -47,53 +48,7 @@ QLineEdit { background-color: #3C3C3C; color: white; border: 1px solid #555; pad
 
 # --- 核心组件 ---
 
-class AnimatedPanel(QFrame):
-    def __init__(self, parent, width, direction="left"):
-        super().__init__(parent)
-        self.setObjectName("SidePanel")
-        self.panel_width = width
-        self.direction = direction
-        self.is_expanded = False
 
-        self.setFixedWidth(0)
-        self.setVisible(False)  # 初始隐藏，防止占位残留
-
-        self.animation = QPropertyAnimation(self, b"minimumWidth")
-        self.animation.setDuration(200)  # 缩短时间能显著减少视觉残留
-        self.animation.setEasingCurve(QEasingCurve.OutCubic)
-
-        # 核心：动画结束后的清理工作
-        self.animation.finished.connect(self._on_animation_finished)
-
-    def toggle(self):
-        self.animation.stop()
-
-        if not self.is_expanded:
-            # --- 展开动作 ---
-            # 1. 先显示面板
-            self.setVisible(True)
-            # 2. 设置目标宽度
-            end_val = self.panel_width
-        else:
-            # --- 收缩动作 ---
-            # 1. 关键：收缩时立即隐藏内部子控件，防止它们干扰边缘渲染
-            # 如果你不想逐个隐藏，可以直接在动画结束前关闭绘制
-            end_val = 0
-
-        self.animation.setEndValue(end_val)
-        self.animation.start()
-        self.is_expanded = not self.is_expanded
-
-    def _on_animation_finished(self):
-        """动画结束后的回调"""
-        if not self.is_expanded:
-            self.setVisible(False)
-        else:
-            # 展开完成后，确保面板是完全可见的
-            self.setVisible(True)
-
-    def _sync_max_width(self, val):
-        self.setMaximumWidth(val)
 
 
 
@@ -238,6 +193,9 @@ class CalibrationLineEdit(QLineEdit):
         else:
             self.setToolTip("")
         super().enterEvent(event)
+
+
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -387,7 +345,7 @@ class MainWindow(QMainWindow):
         self.btn_left_toggle.setObjectName("IconButton")
         self.btn_left_toggle.clicked.connect(lambda: self.left_panel.toggle())
 
-        title_label = QLabel("ALP")
+        title_label = QLabel("Meta Terminal")
         title_label.setStyleSheet("font-weight: bold; color: #007ACC;")
 
         self.btn_script = QPushButton("Python 脚本")
@@ -443,11 +401,45 @@ class MainWindow(QMainWindow):
         self.input_line.returnPressed.connect(self.write_serial)
         self.btn_send.clicked.connect(self.write_serial)
 
+
         self.cb_hex = QCheckBox("Hex发送")
+        # 设置 Hex 发送勾选框的样式
+        self.cb_hex.setStyleSheet("""
+            QCheckBox {
+                color: #CCCCCC;          /* 文字颜色：浅灰色 */
+                font-size: 11px;
+                spacing: 5px;            /* 文字与框的间距 */
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #555555; /* 边框颜色 */
+                border-radius: 2px;
+                background-color: #333333; /* 框内背景 */
+            }
+            QCheckBox::indicator:hover {
+                border: 1px solid #007acc; /* 悬停时变为 VSCode 蓝色 */
+            }
+            QCheckBox::indicator:checked {
+                background-color: #007acc; /* 选中时填充蓝色 */
+                border: 1px solid #007acc;
+                image: url(check_icon.png); /* 如果你有勾选图标可以加上，没有则显示纯色块 */
+            }
+            QCheckBox:disabled {
+                color: #555555;
+            }
+        """)
         self.bottom_layout.addWidget(self.input_line)
         self.bottom_layout.addWidget(self.cb_hex)
         self.bottom_layout.addWidget(self.btn_send)
         # self.main_layout.addWidget(self.bottom_bar)
+
+        self.serial_worker = SerialWorker()
+        self.serial_worker.data_received.connect(self.on_data_received)
+        self.serial_worker.error.connect(self.on_serial_error)
+
+
+
 
         # --- 核心修改：中间水平区域 ---
         self.middle_area = QWidget()
@@ -456,8 +448,11 @@ class MainWindow(QMainWindow):
         self.middle_layout.setSpacing(0)
 
         # 左侧面板：现在它是布局的一员，不再悬浮
-        self.left_panel = AnimatedPanel(self, 220, "left")
-        self.init_left_panel()
+        # self.left_panel = AnimatedPanel(self, 220, "left")
+        # self.init_left_panel()
+
+        self.left_panel = MultiSendPanel(self, width=320,serial_worker =self.serial_worker)
+        self.middle_layout.addWidget(self.left_panel)
 
         # 中间终端：被左侧挤压
         self.terminal = TerminalView()
@@ -466,6 +461,7 @@ class MainWindow(QMainWindow):
         # 创建右侧面板 (现在它也是布局的一员了)
         self.right_panel = AnimatedPanel(self, 220, "right")
         self.init_right_panel()
+
 
         # 按顺序添加：[左] [中] [右]
         self.middle_layout.addWidget(self.left_panel)
@@ -479,11 +475,61 @@ class MainWindow(QMainWindow):
         # ... (此处省略 bottom_bar 的创建代码) ...
         self.main_layout.addWidget(self.bottom_bar)
 
-        self.serial_worker = SerialWorker()
-        self.serial_worker.data_received.connect(self.on_data_received)
-        self.serial_worker.error.connect(self.on_serial_error)
-
         self.combo_port.currentIndexChanged.connect(self.on_port_changed)
+
+        # 1. 创建状态栏
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+
+        # 设置状态栏样式，使其符合 Meta Term 的深色风格
+        self.status_bar.setStyleSheet("""
+                QStatusBar {
+                    background-color: #007acc;  /* 经典的 VSCode 蓝色状态栏 */
+                    color: white;
+                    border-top: 1px solid #333;
+                }
+                QStatusBar::item {
+                    border: none;
+                }
+                QLabel {
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 11px;
+                    padding: 0 5px;
+                }
+            """)
+
+        # 2. 添加永久性的状态标签 (右侧)
+        self.status_port = QLabel("OFFLINE")
+        # self.status_count = QLabel("TX: 0 | RX: 0")
+        self.status_time = QLabel("")
+
+        # 将标签添加到状态栏右侧
+        self.status_bar.addPermanentWidget(self.status_port)
+        # self.status_bar.addPermanentWidget(self.status_count)
+        self.status_bar.addPermanentWidget(self.status_time)
+
+        # 3. 添加一个显示临时消息的标签 (左侧)
+        self.status_msg = QLabel("Ready")
+        self.status_bar.addWidget(self.status_msg)
+
+        # 启动一个定时器更新时间（可选）
+        self.status_timer = QTimer()
+        self.status_timer.timeout.connect(self._update_status_bar)
+        self.status_timer.start(1000)
+
+    def _update_status_bar(self):
+        from datetime import datetime
+        self.status_time.setText(datetime.now().strftime("%H:%M:%S"))
+
+        # 检查 worker 存在且属性存在
+        if self.serial_worker and self.serial_worker.running:
+            # 使用 getattr 安全获取属性，如果不存在则显示 "Unknown"
+            p_name = getattr(self.serial_worker, 'port_name', 'Active')
+            self.status_port.setText(f"CONNECTED: {p_name}")
+            self.status_bar.setStyleSheet("QStatusBar { background-color: #007acc; color: white; }")
+        else:
+            self.status_port.setText("DISCONNECTED")
+            self.status_bar.setStyleSheet("QStatusBar { background-color: #333333; color: #888; }")
 
 
     def toggle_max_restore(self):
@@ -606,7 +652,7 @@ class MainWindow(QMainWindow):
 
         # 初始状态同步
         self.sync_calib_ui_state()
-        layout.addStretch()
+        # layout.addStretch()
 
         # --- 新增：隐藏的校准区域 ---
         self.hidden_calib_widget = QWidget()
@@ -634,7 +680,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.hidden_calib_widget)
 
         # 初始状态
-        self.hidden_calib_widget.setVisible(True)
+        # self.hidden_calib_widget.setVisible(True)
         self.set_hidden_calib_enabled(False)  # 初始禁用
 
         # 绑定按钮事件（你可以根据需要实现对应的逻辑）
@@ -1034,16 +1080,25 @@ class MainWindow(QMainWindow):
         self.sync_ui_state()
 
     def run_custom_script(self):
-        """Python 脚本支持"""
-        script, ok = QInputDialog.getMultiLineText(self, "运行 Python 脚本", "输入脚本 (使用 'send(bytes)')",
-                                                   "import time\nfor i in range(5):\n    send(b'set_lux 1000\\r\\n')\n    time.sleep(1)\n    send(b'set_lux 10000\\r\\n')\n")
+        script, ok = QInputDialog.getMultiLineText(
+            self,
+            "运行 Python 脚本",
+            "输入脚本 (使用 'send(bytes)')",
+            "import time\nfor i in range(5):\n    send(b'set_lux 1000\\r\\n')\n    time.sleep(1)\n    send(b'set_lux 10000\\r\\n')\n"
+        )
+
         if ok and script:
-            try:
-                # 注入 API 环境
-                safe_env = {"send": self.write_serial, "time": __import__('time')}
-                exec(script, safe_env)
-            except Exception as e:
-                QMessageBox.warning(self, "脚本错误", str(e))
+            self.script_thread = ScriptRunner(script, self.write_serial)
+
+            self.script_thread.error.connect(
+                lambda e: QMessageBox.warning(self, "脚本错误", e)
+            )
+
+            self.script_thread.finished.connect(
+                lambda: print("脚本执行完成")
+            )
+
+            self.script_thread.start()
 
     def resizeEvent(self, event):
         # 左右面板的高度现在由 middle_layout 自动管理，无需手动设置
@@ -1092,6 +1147,26 @@ class MainWindow(QMainWindow):
 
         self.sync_ui_state()
 
+class ScriptRunner(QThread):
+    error = Signal(str)
+    finished = Signal()
+
+    def __init__(self, script, send_func):
+        super().__init__()
+        self.script = script
+        self.send_func = send_func
+
+    def run(self):
+        try:
+            safe_env = {
+                "send": self.send_func,
+                "time": __import__("time")
+            }
+            exec(self.script, safe_env)
+        except Exception as e:
+            self.error.emit(str(e))
+        finally:
+            self.finished.emit()
 
 if __name__ == "__main__":
     QApplication.setHighDpiScaleFactorRoundingPolicy(
