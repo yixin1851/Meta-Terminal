@@ -208,7 +208,7 @@ class MainWindow(QMainWindow):
         self.setWindowFlags(Qt.FramelessWindowHint)
         # self.setWindowTitle("YOD")
         self.resize(1100, 750)
-        self.config_file = "config/config.json"
+        self.config_file = "config/com_config.json"
         self._last_ports = [] #  关键：缓存上一次端口
 
         self.setup_ui()
@@ -302,6 +302,7 @@ class MainWindow(QMainWindow):
 
         self._last_ports = current
         self.refresh_ports()
+        self.load_config()
 
         # UX提示（可选）
         self.statusBar().showMessage("串口设备已更新", 2000)

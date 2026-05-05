@@ -1,4 +1,5 @@
 import json
+import os
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
@@ -64,6 +65,11 @@ class MultiSendPanel(AnimatedPanel):
         self.loop_timer.timeout.connect(self._handle_loop_send)
         self.current_loop_index = 0
         self.serial_worker = serial_worker
+
+        # 在 __init__ 中添加 定时器触发保存cmd_config.json
+        self.save_timer = QTimer()
+        self.save_timer.setSingleShot(True)  # 只触发一次
+        self.save_timer.timeout.connect(self._execute_save)  # 真正的写入逻辑
 
         self.setStyleSheet("""
             QWidget#SidePanel { background-color: #252526; border-right: 1px solid #333333; }
@@ -151,8 +157,15 @@ class MultiSendPanel(AnimatedPanel):
         self.list_layout.setSpacing(6)
 
         # 生成 15 条指令行
-        for i in range(1, 36):
-            self.add_command_row(i)
+        # for i in range(1, 36):
+        #     self.add_command_row(i)
+        # 不再手动循环 range(1, 16)
+        # 而是调用加载函数
+        self.load_settings()
+
+        # 如果加载后行数太少，可以补齐到 36 行（保持界面美观）
+        while len(self.rows) < 36:
+            self.add_command_row(len(self.rows) + 1)
 
         self.scroll_area.setWidget(self.list_widget)
         layout.addWidget(self.scroll_area)
@@ -161,6 +174,8 @@ class MultiSendPanel(AnimatedPanel):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.addWidget(self.content_container)
+
+
 
     def add_command_row(self, data=None):
         """
@@ -207,6 +222,27 @@ class MultiSendPanel(AnimatedPanel):
         edit_ctx = QLineEdit(ctx_content)
         edit_ctx.setPlaceholderText(f"Cmd {order_val}")
 
+
+        # --- 新增：悬停显示全名逻辑 ---
+        def update_tooltip():
+            text = edit_ctx.text()
+            if not text:
+                edit_ctx.setToolTip("")
+                return
+
+            # 如果勾选了 HEX 模式，额外显示字节数
+            if chk_hex.isChecked():
+                import re
+                hex_len = len(re.sub(r'[^0-9a-fA-F]', '', text)) // 2
+                edit_ctx.setToolTip(f"Full Data: {text}\nLength: {hex_len} Bytes")
+            else:
+                edit_ctx.setToolTip(f"Full Cmd: {text}\nLength: {len(text)} Chars")
+        # 初始加载时跑一遍
+        update_tooltip()
+        # 绑定信号：文本一变，悬停提示跟着变
+        edit_ctx.textChanged.connect(update_tooltip)
+
+
         # Send Button (功能 1)
         btn_send = QPushButton("Send")
         btn_send.setFixedWidth(55)
@@ -240,6 +276,69 @@ class MultiSendPanel(AnimatedPanel):
 
         self.rows.append(row_obj)
         self.list_layout.addWidget(row_widget)
+
+        # --- 新增：绑定自动保存信号 ---
+        # 1. 当文本框内容改变时 (Context 和 ms)
+        row_obj["ctx"].textChanged.connect(self.save_settings)
+        row_obj["ms"].textChanged.connect(self.save_settings)
+        row_obj["order"].textChanged.connect(self.save_settings)
+
+        # 2. 当 HEX 勾选状态改变时
+        row_obj["hex"].stateChanged.connect(self.save_settings)
+
+        def on_hex_toggled(state):
+            """
+            state: 2 代表 Checked (Qt.CheckState.Checked), 0 代表 Unchecked
+            """
+            # 1. 获取当前文本并去空格
+            current_text = edit_ctx.text().strip()
+            if not current_text:
+                return
+
+            # 2. 暂时屏蔽信号，防止 setText 触发 textChanged 导致重复保存
+            edit_ctx.blockSignals(True)
+
+            try:
+                if state == 2:  # 切换到 HEX 模式
+                    # 逻辑：字符串 -> 十六进制字符串 (e.g., "help" -> "68 65 6C 70")
+                    # 使用 upper() 保持 Meta Term 的专业感
+                    hex_content = current_text.encode('utf-8').hex(' ').upper()
+                    edit_ctx.setText(hex_content)
+
+                else:  # 切换回 文本 模式
+                    # 逻辑：十六进制字符串 -> 字符串 (e.g., "68 65 6C 70" -> "help")
+                    # 移除所有空格
+                    clean_hex = "".join(current_text.split())
+
+                    # 检查长度是否为偶数，若不是则补0（简单容错）
+                    if len(clean_hex) % 2 != 0:
+                        clean_hex = '0' + clean_hex
+
+                    raw_bytes = bytes.fromhex(clean_hex)
+
+                    try:
+                        # 尝试解码回文本
+                        decoded_text = raw_bytes.decode('utf-8')
+                        edit_ctx.setText(decoded_text)
+                    except UnicodeDecodeError:
+                        # 关键：如果包含 0xAA/0xFF 等不可见字符，解码会失败
+                        # 此时我们不做转换，保持 HEX 原样，并在状态栏提示（可选）
+                        print("Meta Term: 包含非文本字节，保持 HEX 格式。")
+                        # 强制把勾选框勾回去，防止 UI 状态与内容不符
+                        chk_hex.blockSignals(True)
+                        chk_hex.setChecked(True)
+                        chk_hex.blockSignals(False)
+
+            except Exception as e:
+                print(f"转换异常: {e}")
+
+            # 3. 恢复信号并更新 ToolTip
+            edit_ctx.blockSignals(False)
+            update_tooltip()
+            # 手动触发一次保存，确保 config 目录下的 cmd_config.json 实时更新
+            self.save_settings()
+        # 绑定勾选框状态改变信号
+        chk_hex.stateChanged.connect(on_hex_toggled)
 
     # --- 功能 1: 发送逻辑 ---
     def _send_single_row(self, row_idx_in_list):
@@ -301,19 +400,40 @@ class MultiSendPanel(AnimatedPanel):
         data = {"content": row["ctx"].text(), "is_hex": row["hex"].isChecked()}
         self.data_ready_to_send.emit(data)
 
-    # --- 功能 5: 保存设置 ---
     def save_settings(self):
+        """
+        所有的控件更新都会触发这个函数，
+        但它只是重置定时器，不会立即写硬盘。
+        """
+        self.save_timer.start(1000)  # 1000ms 后执行 _execute_save
+
+    def _execute_save(self):
+        """
+        真正的 JSON 写入逻辑
+        """
+        config_dir = "config"
+        file_path = os.path.join(config_dir, "cmd_config.json")
+
+        if not os.path.exists(config_dir):
+            os.makedirs(config_dir)
+
         config_data = []
         for row in self.rows:
+            # 即使内容为空，我们也保存结构，确保下次加载行数一致
             config_data.append({
                 "order": row["order"].text(),
                 "hex": row["hex"].isChecked(),
                 "ctx": row["ctx"].text(),
                 "ms": row["ms"].text()
             })
-        with open("multi_send_config.json", "w", encoding="utf-8") as f:
-            json.dump(config_data, f, indent=4)
-        print("Settings Saved.")
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(config_data, f, indent=4, ensure_ascii=False)
+            # 调试用，稳定后可以删掉这行 print
+            # print("Meta Term: 配置已自动同步。")
+        except Exception as e:
+            print(f"自动保存失败: {e}")
 
     def send_cmd(self, row_obj):
         # 提取输入框文本
@@ -348,3 +468,38 @@ class MultiSendPanel(AnimatedPanel):
             print(f"HEX 格式错误: 请检查输入是否包含非 0-9/A-F 字符。详情: {e}")
         except Exception as e:
             print(f"发送异常: {e}")
+
+
+
+
+    def load_settings(self):
+        config_path = os.path.join("config", "cmd_config.json")
+
+        # 1. 检查文件是否存在
+        if not os.path.exists(config_path):
+            print(f"未找到配置文件: {config_path}，将使用默认空白行。")
+            return
+
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config_data = json.load(f)
+
+            if not config_data:
+                return
+
+            # 2. 清理现有的行（可选，取决于你是在构造函数还是之后调用）
+            # 如果初始化时已经加了 15 行，可以先清理 self.rows 和 self.list_layout
+
+            # 3. 按照配置重新生成行
+            # 先清空旧数据结构
+            for row in self.rows:
+                row["widget"].deleteLater()
+            self.rows.clear()
+
+            for item in config_data:
+                self.add_command_row(item)
+
+            print(f"成功加载 {len(config_data)} 条指令配置。")
+
+        except Exception as e:
+            print(f"加载配置失败: {e}")
