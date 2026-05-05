@@ -280,7 +280,7 @@ class MainWindow(QMainWindow):
                 # 检查匹配
                 if self.key_buffer == self.secret_key:
                     self.log_to_terminal("工程模式已激活", "#98C379")
-                    self.hidden_calib_widget.setVisible(True)
+                    self.set_hidden_calib_enabled(True)
                     self.statusBar().showMessage("Special mode activated!", 3000)
                     self.key_buffer = ""  # 匹配后清空
                     # return True # 如果不想让 YOD001 这几个字发给串口，就取消注释这一行
@@ -596,14 +596,34 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self.hidden_calib_widget)
 
-        # 初始状态：隐藏
-        self.hidden_calib_widget.setVisible(False)
+        # 初始状态
+        self.hidden_calib_widget.setVisible(True)
+        self.set_hidden_calib_enabled(False)  # 初始禁用
 
         # 绑定按钮事件（你可以根据需要实现对应的逻辑）
         self.btn_internal_calib.clicked.connect(lambda: self.log_to_terminal("执行光源内校准...", "#E06C75"))
         self.btn_external_calib.clicked.connect(lambda: self.log_to_terminal("执行光源外校准...", "#E06C75"))
 
         layout.addStretch()
+
+    def set_hidden_calib_enabled(self, enabled: bool):
+        """控制隐藏校准区域是否可用（灰/亮）"""
+        for widget in self.hidden_calib_widget.findChildren(QWidget):
+            widget.setEnabled(enabled)
+
+        # 可选：视觉效果更明显
+        if enabled:
+            self.hidden_calib_widget.setStyleSheet("")
+        else:
+            self.hidden_calib_widget.setStyleSheet("""
+                QWidget {
+                    color: #666;
+                }
+                QPushButton {
+                    background-color: #333;
+                    color: #666;
+                }
+            """)
 
     def sync_calib_ui_state(self):
         """量产校准模式 Checkbox 切换逻辑"""
