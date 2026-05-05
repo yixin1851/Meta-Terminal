@@ -198,7 +198,6 @@ class TerminalView(QPlainTextEdit):
 class CalibrationLineEdit(QLineEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
-
         # 1. 基础校验：只允许输入数字、英文逗号和中文逗号
         # 允许中文逗号是为了能在 fix_content 中捕捉并转换它
         reg_ex = QRegularExpression(r"[0-9,,，]*")
@@ -266,6 +265,8 @@ class MainWindow(QMainWindow):
         self.start_port_monitor()  #  启动监听
 
         self.protocol = LineProtocol()  # 实例化协议处理器
+
+        self._waiting_for_echo = False
 
     def eventFilter(self, watched, event):
         # 监控所有的键盘按下事件
@@ -527,57 +528,48 @@ class MainWindow(QMainWindow):
         layout.addWidget(line)
         # ---------------------
 
-        # --- 校准 UI 部分 ---
+        # --- 统一校准 UI 区域 ---
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
-        line.setStyleSheet("margin: 10px 0; background-color: #444;")
+        line.setStyleSheet("margin: 15px 0; background-color: #444;")
         layout.addWidget(line)
 
-        # 1. 主控开关
-        self.cb_calibration = QCheckBox("量产校准")
-        self.cb_calibration.setStyleSheet("font-weight: bold; color: #569CD6;")
+        # 1. 总开关 Checkbox
+        self.cb_calibration = QCheckBox("量产校准模式")
+        self.cb_calibration.setStyleSheet("font-weight: bold; color: #569CD6; font-size: 13px;")
         layout.addWidget(self.cb_calibration)
 
-        # 2. 单选按钮组
-        self.calibration_group = QButtonGroup(self)
-        self.calib_rows = []
+        # 2. 模式选择 ComboBox
+        self.combo_calib_mode = QComboBox()
+        # 这里填入你在 MODE_CONFIG 中定义的 Key
+        self.combo_calib_mode.addItems(["Lux", "PD", "CL500", "DN", "Other"])
+        layout.addWidget(QLabel("选择校准维度:"))
+        layout.addWidget(self.combo_calib_mode)
 
-        options = [("PD", "edit_pd"), ("CL500", "edit_cl500"), ("Other", "edit_other")]
-        for text, obj_name in options:
-            h_layout = QHBoxLayout()
-            rb = QRadioButton(text)
+        # 3. 点位输入 LineEdit (使用你自定义的 CalibrationLineEdit)
+        self.edit_calib_points = CalibrationLineEdit()
+        self.edit_calib_points.setPlaceholderText("例如: 10, 50, 100")
+        layout.addWidget(QLabel("校准点位 (逗号分隔):"))
+        layout.addWidget(self.edit_calib_points)
 
-            edit = CalibrationLineEdit()
-            edit.setPlaceholderText(f"数字,数字...")
-
-            self.calibration_group.addButton(rb)
-            h_layout.addWidget(rb, 1)
-            h_layout.addWidget(edit, 2)
-            layout.addLayout(h_layout)
-
-            self.calib_rows.append((rb, edit))
-            setattr(self, obj_name, edit)
-
-            # 关键：当单选按钮状态改变时，同步更新输入框状态
-            rb.toggled.connect(self.sync_calibration_edits)
-
+        # 4. 开始按钮
         self.btn_start_calib = QPushButton("开始校准")
-        self.btn_start_calib.setFixedHeight(35)
-        # 设置一个明显的样式
+        self.btn_start_calib.setFixedHeight(40)
         self.btn_start_calib.setStyleSheet("""
                     QPushButton:enabled { background-color: #007ACC; color: white; font-weight: bold; }
                     QPushButton:disabled { background-color: #333; color: #666; }
                 """)
-        self.btn_start_calib.clicked.connect(self.on_start_calibration_clicked)  # 绑定点击事件
         layout.addWidget(self.btn_start_calib)
 
-        # 3. 初始状态绑定
-        self.cb_calibration.toggled.connect(self.sync_calibration_edits)
+        # --- 逻辑绑定 ---
+        self.cb_calibration.toggled.connect(self.sync_calib_ui_state)
+        # 关键：监听下拉框切换模式 (必须加这一行，否则切换 Lux 到 CL500 时没反应)
+        self.combo_calib_mode.currentIndexChanged.connect(self.sync_calib_ui_state)
+        self.btn_start_calib.clicked.connect(self.on_start_calibration_clicked)
 
-        # 4. 初始执行一次同步（禁用所有）
-        self.sync_calibration_edits()
-
-        layout.addWidget(self.btn_start_calib)
+        # 初始状态同步
+        self.sync_calib_ui_state()
+        layout.addStretch()
 
         # --- 新增：隐藏的校准区域 ---
         self.hidden_calib_widget = QWidget()
@@ -613,6 +605,81 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
 
+    def sync_calib_ui_state(self):
+        """量产校准模式 Checkbox 切换逻辑"""
+        master_on = self.cb_calibration.isChecked()
+
+        if master_on:
+            # --- 阶段 A：发起握手，UI 必须变灰并锁定 ---
+            self.log_to_terminal("正在检测设备连接 (发送 set_lux 0)...", "#D19A66")
+
+            self._waiting_for_echo = True
+
+            # 强制所有组件禁用并变灰
+            self.combo_calib_mode.setEnabled(False)
+            self.edit_calib_points.setEnabled(False)
+            self.btn_start_calib.setEnabled(False)
+            self.btn_start_calib.setText("正在匹配设备...")
+
+            # 视觉变灰处理
+            self.edit_calib_points.setStyleSheet("background-color: #333; color: #666; border: 1px solid #444;")
+            self.edit_calib_points.setPlaceholderText("正在等待设备回显...")
+
+            # 发送指令
+            self.write_serial("set_lux 0".encode('utf-8'))
+
+            # 超时处理
+            QTimer.singleShot(3000, self.check_handshake_timeout)
+        else:
+            # --- 阶段 B：完全关闭状态 ---
+            self._waiting_for_echo = False
+            self.combo_calib_mode.setEnabled(False)
+            self.edit_calib_points.setEnabled(False)
+            self.edit_calib_points.clear()
+            self.edit_calib_points.setPlaceholderText("请开启量产校准模式")
+            self.edit_calib_points.setStyleSheet("background-color: #333; color: #666;")
+
+            self.btn_start_calib.setEnabled(False)
+            self.btn_start_calib.setText("开始校准")
+
+    def finalize_ui_unlock(self):
+        """回显成功后，真正根据模式逻辑解锁 UI 并变亮"""
+        current_mode = self.combo_calib_mode.currentText()
+        placeholder_modes = ["CL500", "DN", "Other"]
+        is_placeholder = current_mode in placeholder_modes
+
+        # 1. 基础组件解锁
+        self.combo_calib_mode.setEnabled(True)
+        self.edit_calib_points.setEnabled(True)
+        self.btn_start_calib.setText("开始校准")
+
+        # 2. 根据模式决定具体样式
+        if is_placeholder:
+            # 模式不支持：虽然解锁了外壳，但内部锁定显示红色警告
+            self.edit_calib_points.setReadOnly(True)
+            self.edit_calib_points.clear()
+            self.edit_calib_points.setPlaceholderText("该功能暂无，请联系作者！")
+            self.edit_calib_points.setStyleSheet("background-color: #444; color: #FF5555; font-weight: bold;")
+            self.btn_start_calib.setEnabled(False)
+        else:
+            # 模式正常：彻底变亮 (白色背景)
+            self.edit_calib_points.setReadOnly(False)
+            self.edit_calib_points.setPlaceholderText("例如: 10, 50, 100")
+            self.edit_calib_points.setStyleSheet("background-color: #EEE; color: #000; border: 1px solid #CCC;")
+            self.btn_start_calib.setEnabled(True)
+
+    def check_handshake_timeout(self):
+        """超时处理"""
+        if hasattr(self, '_waiting_for_echo') and self._waiting_for_echo:
+            self._waiting_for_echo = False
+            self.log_to_terminal("连接超时：请检查串口端口是否选择正确、波特率或是否已经连接串口等!", "#E06C75")
+
+            # 自动取消勾选并复位
+            self.cb_calibration.blockSignals(True)
+            self.cb_calibration.setChecked(False)
+            self.cb_calibration.blockSignals(False)
+            self.btn_start_calib.setText("开始校准")
+
     def sync_calibration_edits(self):
         """统一管理校准区域的启用/禁用逻辑"""
         master_on = self.cb_calibration.isChecked()
@@ -645,87 +712,48 @@ class MainWindow(QMainWindow):
 
     def on_start_calibration_clicked(self):
         """点击开始校准后的逻辑"""
-        selected_rb = self.calibration_group.checkedButton()
-        if not selected_rb:
-            return
+        # 1. 获取当前选择的模式
+        mode = self.combo_calib_mode.currentText()
 
-        mode = selected_rb.text()
-
-        # 1. 获取对应的文本框对象
-        # 之前我们用了 setattr(self, obj_name, edit)，现在可以直接通过名字获取
-        edit_map = {
-            "PD": self.edit_pd,
-            "CL500": self.edit_cl500,
-            "Other": self.edit_other
-        }
-        target_edit = edit_map.get(mode)
-
-        # 2. 校验内容是否为空
-        raw_text = target_edit.text().strip(',')
+        # 2. 获取并清洗点位数据
+        raw_text = self.edit_calib_points.text().strip(',')
         if not raw_text:
-            QMessageBox.critical(self, "错误", f"请输入 {mode} 的校准数值！")
+            QMessageBox.critical(self, "错误", "请输入校准点位！")
             return
 
-        # 3. 解析数据（转为列表）
         try:
-            val_list = [float(x) for x in raw_text.split(',') if x]
+            # 转换为 float 列表
+            val_list = [float(x) for x in raw_text.split(',') if x.strip()]
         except ValueError:
-            QMessageBox.warning(self, "格式错误", "请输入合法的数字列表")
+            QMessageBox.warning(self, "格式错误", "点位列表包含非法字符，请检查数字格式")
             return
 
-        # 4. 开启新线程
-        # 注意：为了防止线程对象被销毁，将其赋给 self
-        # self.calib_thread = CalibrationThread(mode, val_list)
+        # 3. 锁定 UI 防止二次点击
+        self.cb_calibration.setEnabled(False)
+        self.btn_start_calib.setEnabled(False)
+        self.btn_start_calib.setText("校准中...")
+
+        # 4. 创建并启动线程
         self.calib_thread = CalibrationThread(mode, val_list, self.serial_worker)
 
-        # --- 统一分发消息 ---
-        # 发送到状态栏（原有逻辑）
-        self.calib_thread.log_signal.connect(lambda msg: self.statusBar().showMessage(msg))
-
-        # 发送到黑框终端（新增逻辑）
-        # 使用 f-string 加上前缀，方便在调试时区分系统消息和原始串口数据
-        # self.calib_thread.log_signal.connect(
-        #     lambda msg: self.terminal.insertPlainText(f"\n[SYS] {mode} Calibration: {msg}")
-        # )
-        # 这样校准日志会自动换行、变色，并与串口原生数据在视觉上区分开
-        self.calib_thread.log_signal.connect(
-            lambda msg: self.log_to_terminal(msg, "#98C379")  # 使用浅绿色区分校准日志
-        )
-        # 确保黑框始终滚动到最下方
-        self.calib_thread.log_signal.connect(lambda _: self.terminal.ensureCursorVisible())
-
-        # 绑定结束回调
+        # 信号绑定
+        self.calib_thread.log_signal.connect(lambda msg: self.log_to_terminal(msg, "#98C379"))
         self.calib_thread.finished_signal.connect(self.on_calibration_finished)
 
-        # 界面反馈：点击瞬间也在黑框打印一条启动消息
-        self.terminal.insertPlainText(f"\n>>> [{mode}] 校准线程已启动...\n")
-        self.statusBar().showMessage("校准线程已启动...")
-
+        self.log_to_terminal(f"启动 {mode} 模式校准，目标点位: {val_list}", "#D19A66")
         self.calib_thread.start()
 
     def on_calibration_finished(self, result_msg):
         """校准结束的回调"""
-        # 使用 HTML 的 <span> 标签设置颜色
-        # 如果你想让整个 result_msg 变绿，可以这样拼接
-        colored_msg = f"<span style='color: #2ecc71; font-weight: bold;'>{result_msg}</span>"
+        QMessageBox.information(self, "任务结束", f"<b>校准结果:</b><br>{result_msg}")
 
-        # 弹出信息框
-        QMessageBox.information(self, "任务结束", colored_msg)
-        self.terminal.insertPlainText(f"\n>>> 校准已完成！\n")
+        # 恢复 UI 状态
+        self.cb_calibration.setEnabled(True)
+        self.cb_calibration.setChecked(False)  # 自动关闭校准开关
+        self.btn_start_calib.setText("开始校准")
+        self.sync_calib_ui_state()
 
-        # 1. 恢复按钮状态
-        self.btn_start_calib.setEnabled(True)
-
-        # 2. 核心：取消勾选“校准”主开关，触发 UI 联动变灰
-        self.cb_calibration.setChecked(False)
-
-        # 3. 状态栏提示
-        self.statusBar().showMessage("校准流程已自动关闭", 3000)
-        self.sync_calibration_edits()  # 刷新UI状态
-
-        # 这里可以调用你之前的串口发送逻辑
-        # cmd = f"CALIBRATE:{mode}:{value}\r\n".encode('utf-8')
-        # self.write_serial(cmd)
+        self.log_to_terminal("校准任务已结束", "#5DADE2")
 
     def get_serial_config(self):
         parity_map = {
@@ -867,8 +895,18 @@ class MainWindow(QMainWindow):
                     self.terminal.insertPlainText(packet["hex"] + " ")
                 if packet["mode"] == "text_stream" :
                     # 现在的 packet["render"] 可能是单个字符，也可能是带换行的字符串
+                    content = packet.get("render", "")
                     # 无论哪种，insertPlainText 都会立即渲染，实现实时回显
-                    self.terminal.insertPlainText(packet["render"])
+                    self.terminal.insertPlainText(content)
+
+                    # --- 握手匹配：检查回显内容 ---
+                    if hasattr(self, '_waiting_for_echo') and self._waiting_for_echo:
+                        # 匹配设备返回的指令回显
+                        if "set_lux 0" in content:
+                            self._waiting_for_echo = False
+                            self.log_to_terminal("收到设备回显，软件与硬件握手成功！", "#98C379")
+                            self.finalize_ui_unlock()  # 执行解锁
+                            return
 
                     # --- 核心改进：根据线程状态决定是否发原始数据 发送cat数据---
                     if self.cb_calibration.isChecked() and hasattr(self, 'calib_thread') and self.calib_thread.isRunning():

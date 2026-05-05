@@ -81,8 +81,10 @@ class CalibrationThread(QThread):
                 try:
                     data = json.loads(line)
                     # 以 lux 值作为索引存入字典，方便后续直接查找使用
-                    if "lux" in data:
-                        organized_data[data["lux"]] = data
+                    if "Lux" in data:
+                        # organized_data[data["Lux"]] = data
+                        search_key = format(float(data["Lux"]), '.2f')
+                        organized_data[search_key] = data
                 except json.JSONDecodeError:
                     continue
         return organized_data
@@ -248,7 +250,7 @@ class CalibrationThread(QThread):
             return False, "未知模式", None
 
         # --- 动态获取当前模式的上下限和参考值 ---
-        target_lux = item["lux"]
+        target_lux = item["Lux"]
         b_ref = item.get(cfg["ref"], -1)
         current_up = item.get(cfg["up"], -1)  # 独立判断：读取当前模式的 Up
         current_down = item.get(cfg["down"], -1)  # 独立判断：读取当前模式的 Down
@@ -341,6 +343,7 @@ class CalibrationThread(QThread):
 
             if not raw_text:
                 self.log_signal.emit(">>> [ERROR] 未能读取到配置文件内容")
+                self.finished_signal.emit("失败：配置文件不存在")  # 必须发送完成信号，否则 UI 会一直卡在“校准中”
                 return
 
             # 3. 整理数据
@@ -360,7 +363,7 @@ class CalibrationThread(QThread):
 
             for val in self.values:
                 try:
-                    search_key = int(float(val))
+                    search_key = format(float(val), '.2f')
                 except:
                     search_key = val
 
@@ -380,8 +383,8 @@ class CalibrationThread(QThread):
                     else:
                         # 情况 B：执行了微调，需要根据当前模式改写 JSON 对应字段
                         # 计算 K 系数：微调后的输入 / 原始标准值
-                        k_factor = test_input / item["lux"]
-                        b_factor = test_input - item["lux"]
+                        k_factor = test_input / item["Lux"]
+                        b_factor = test_input - item["Lux"]
 
                         # 动态更新字段：如 getlux/Lk 或 PD_value/PDK 等
                         item[cfg["val_field"]] = round(a_val_result, 2)
