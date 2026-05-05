@@ -86,21 +86,6 @@ class AnimatedPanel(QFrame):
         self.is_expanded = not self.is_expanded
 
 
-# class TerminalView(QPlainTextEdit):
-#     send_data = Signal(bytes)
-#
-#     def keyPressEvent(self, event):
-#         # 如果按下的是回车键
-#         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-#             self.send_data.emit(b'\r\n')
-#             return  # 阻止回车符输入到文本框里，或者去掉 return 让它也显示在屏幕上
-#
-#         # 原有的即时发送逻辑
-#         text = event.text()
-#         if text:
-#             self.send_data.emit(text.encode('utf-8'))
-#             return
-#         super().keyPressEvent(event)
 
 class TerminalView(QPlainTextEdit):
     send_data = Signal(bytes)
@@ -266,7 +251,7 @@ class MainWindow(QMainWindow):
 
         self.protocol = LineProtocol()  # 实例化协议处理器
 
-        self._waiting_for_echo = False
+        # self._waiting_for_echo = False
 
     def eventFilter(self, watched, event):
         # 监控所有的键盘按下事件
@@ -469,7 +454,7 @@ class MainWindow(QMainWindow):
     def init_right_panel(self):
         layout = QVBoxLayout(self.right_panel)
         layout.setContentsMargins(15, 15, 15, 15)  # 让内容离边缘远一点，更好看
-        layout.addWidget(QLabel("串口设置 (SSCOM)"))
+        layout.addWidget(QLabel("串口设置"))
 
         self.combo_port = QComboBox()
         self.refresh_ports()
@@ -625,6 +610,22 @@ class MainWindow(QMainWindow):
                 }
             """)
 
+    def send_cmd(self, cmd_str):
+        """
+        统一发送字符串命令的函数
+        :param cmd_str: 命令字符串，如 "set_lux 100.0"
+        """
+        if not cmd_str:
+            return
+
+        # 拼接换行符并转为字节流
+        full_cmd = f"{cmd_str}\r\n".encode('utf-8')
+
+        # 调用 serial_worker 发送
+        if self.serial_worker and self.serial_worker.running:
+            self.serial_worker.send_async(full_cmd)
+
+
     def sync_calib_ui_state(self):
         """量产校准模式 Checkbox 切换逻辑"""
         master_on = self.cb_calibration.isChecked()
@@ -633,6 +634,8 @@ class MainWindow(QMainWindow):
             # --- 阶段 A：发起握手，UI 必须变灰并锁定 ---
             self.log_to_terminal("正在检测设备连接 (发送 set_lux 0)...", "#D19A66")
 
+            # 重置缓冲区
+            self._echo_tmp_buffer = ""
             self._waiting_for_echo = True
 
             # 强制所有组件禁用并变灰
@@ -646,7 +649,7 @@ class MainWindow(QMainWindow):
             self.edit_calib_points.setPlaceholderText("正在等待设备回显...")
 
             # 发送指令
-            self.write_serial("set_lux 0".encode('utf-8'))
+            self.send_cmd("set_lux 0")
 
             # 超时处理
             QTimer.singleShot(3000, self.check_handshake_timeout)
@@ -916,17 +919,27 @@ class MainWindow(QMainWindow):
                 if packet["mode"] == "text_stream" :
                     # 现在的 packet["render"] 可能是单个字符，也可能是带换行的字符串
                     content = packet.get("render", "")
-                    # 无论哪种，insertPlainText 都会立即渲染，实现实时回显
+                    # 无论是否在匹配，收到的数据都应该实时打到终端上
                     self.terminal.insertPlainText(content)
+                    # --- 逻辑 A：回显匹配（静默进行） ---
+                    if getattr(self, '_waiting_for_echo', False):
+                        if not hasattr(self, '_echo_tmp_buffer'):
+                            self._echo_tmp_buffer = ""
 
-                    # --- 握手匹配：检查回显内容 ---
-                    if hasattr(self, '_waiting_for_echo') and self._waiting_for_echo:
-                        # 匹配设备返回的指令回显
-                        if "set_lux 0" in content:
+                        self._echo_tmp_buffer += content
+
+                        if "set_lux 0" in self._echo_tmp_buffer:
                             self._waiting_for_echo = False
-                            self.log_to_terminal("收到设备回显，软件与硬件握手成功！", "#98C379")
-                            self.finalize_ui_unlock()  # 执行解锁
-                            return
+                            self._echo_tmp_buffer = ""
+                            self.log_to_terminal("软件和设备握手成功", "#98C379")
+                            # 这里不要 return，让它继续往下走去显示
+                            self.finalize_ui_unlock()
+
+                        elif len(self._echo_tmp_buffer) > 100:
+                            self._echo_tmp_buffer = self._echo_tmp_buffer[-50:]
+
+                    # 自动滚动到底部
+                    self.terminal.moveCursor(QTextCursor.End)
 
                     # --- 核心改进：根据线程状态决定是否发原始数据 发送cat数据---
                     if self.cb_calibration.isChecked() and hasattr(self, 'calib_thread') and self.calib_thread.isRunning():
@@ -981,22 +994,34 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "脚本错误", str(e))
 
     def resizeEvent(self, event):
-        # 修正侧边栏高度
+        # 1. 基础尺寸计算
         menu_h = self.top_menu.height()
-        panel_h = self.height() - menu_h
+        bar_h = self.bottom_bar.height()  # 如果底部也有栏，记得减去
+        panel_h = self.height() - menu_h - bar_h
+        win_w = self.width()
 
         self.left_panel.setFixedHeight(panel_h)
         self.right_panel.setFixedHeight(panel_h)
 
-        # 调整 y 坐标，让侧边栏从菜单栏下方开始，这样就不会挡住顶部的 ☰ 按钮
+        # 2. 修正 Y 坐标
         self.left_panel.move(self.left_panel.x(), menu_h)
-        self.right_panel.move(self.right_panel.x(), menu_h)
+        # 注意：右侧面板在 resize 时必须重新计算 X，否则会悬浮在屏幕中间
 
-        # 如果面板还没展开，确保它躲在屏幕外面
+        # 3. 处理右侧面板的 X 坐标对齐
+        if self.right_panel.is_expanded:
+            # 展开状态：贴着右边缘
+            rx = win_w - self.right_panel.width()
+        else:
+            # 隐藏状态：完全躲在右边缘外
+            rx = win_w
+
+        self.right_panel.move(rx, menu_h)
+
+        # 4. 处理左侧面板（左侧 X 坐标通常为 0 或 -width，相对简单）
         if not self.left_panel.is_expanded:
-            self.left_panel.hide_instantly()
-        if not self.right_panel.is_expanded:
-            self.right_panel.hide_instantly()
+            self.left_panel.move(-self.left_panel.width(), menu_h)
+        else:
+            self.left_panel.move(0, menu_h)
 
         super().resizeEvent(event)
 
@@ -1045,6 +1070,9 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == "__main__":
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
     app = QApplication(sys.argv)
     # 设置全局字体以增强现代感
     app.setFont(QFont("Segoe UI", 9))
