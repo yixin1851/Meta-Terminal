@@ -2,6 +2,7 @@ import sys
 import json
 import os
 import re
+import sys
 import serial
 import serial.tools.list_ports
 from serial_worker import SerialWorker
@@ -219,26 +220,37 @@ class MainWindow(QMainWindow):
 
         self.protocol = LineProtocol()  # 实例化协议处理器
 
-        self._setup_workers()
+        # self._setup_cl500_workers()
         # self._waiting_for_echo = False
 
-    def _setup_workers(self):
-
+    def _setup_cl500_workers(self):
+        # 如果已经存在，不要重复创建
+        if hasattr(self, 'cl500_worker'):
+            return
+        # 1. 确定 DLL 路径 (保留你原有的逻辑)
         if getattr(sys, 'frozen', False):
-            # 如果是打包后的环境
             BASE_DIR = os.path.dirname(sys.executable)
         else:
-            # 如果是源代码运行环境
             BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-        # 拼接驱动目录的相对路径
-        # 这样无论你把 py_serial 文件夹整体挪到哪个盘，都能自动找到驱动
         DLL_RELATIVE_PATH = os.path.join(BASE_DIR, "CL500A", "bin")
 
-        # 使用动态生成的 DLL 路径
+        # 2. 创建线程和 Worker 实例
+        self.cl500_thread = QThread()
         self.cl500_worker = IlluminanceWorker(DLL_RELATIVE_PATH)
-        # 启动初始化（在后台线程或通过信号触发）
-        self.cl500_worker.init_sdk()
+
+        # 3. 将 Worker 移动到子线程
+        self.cl500_worker.moveToThread(self.cl500_thread)
+
+        # 4. 绑定信号到你的终端日志
+        # 这样 CL500 内部的所有提示都会自动显示在你的黑色终端里
+        self.cl500_worker.log_signal.connect(lambda msg: self.log_to_terminal(f"[CL500] {msg}", "#E5C07B"))
+
+        # 6. 启动线程
+        self.cl500_thread.start()
+
+        # 7. 异步触发初始化 (不会卡死 UI)
+        # 使用 Timer 是为了确保在线程启动完成后调用
+        QTimer.singleShot(500, self.cl500_worker.init_sdk)
 
     def eventFilter(self, watched, event):
         # 监控所有的键盘按下事件
@@ -726,12 +738,25 @@ class MainWindow(QMainWindow):
 
 
     def sync_calib_ui_state(self):
+
+        self.finalize_ui_unlock()
+        self.log_to_terminal("正在检测设备连接...", "#D19A66")
+
+        current_mode = self.combo_calib_mode.currentText()  # 获取当前选择的模式
+        if current_mode == "CL500":
+            self.log_to_terminal("========================================", "#E06C75")
+            self.log_to_terminal("[重要提示] 当前处于 CL-500A 校准模式", "#E06C75")
+            self.log_to_terminal("启动校准前，请确保照度计【遮光罩已关闭】或【传感器完全遮蔽】！", "#E5C07B")
+            self.log_to_terminal("零校准失败将导致后续所有数据异常。", "#E5C07B")
+            self.log_to_terminal("========================================", "#E06C75")
+
+        return
         """量产校准模式 Checkbox 切换逻辑"""
         master_on = self.cb_calibration.isChecked()
 
         if master_on:
             # --- 阶段 A：发起握手，UI 必须变灰并锁定 ---
-            self.log_to_terminal("正在检测设备连接 (发送 set_lux 0)...", "#D19A66")
+            self.log_to_terminal("正在检测设备连接...", "#D19A66")
 
             # 重置缓冲区
             self._echo_tmp_buffer = ""
@@ -834,9 +859,12 @@ class MainWindow(QMainWindow):
 
     def on_start_calibration_clicked(self):
         """点击开始校准后的逻辑"""
+        current_mode = self.combo_calib_mode.currentText()  # 获取当前选择的模式
+        if current_mode == "CL500":
+            if not hasattr(self, 'cl500_worker'):
+                self._setup_cl500_workers()
         # 1. 获取当前选择的模式
         mode = self.combo_calib_mode.currentText()
-
         # 2. 获取并清洗点位数据
         raw_text = self.edit_calib_points.text().strip(',')
         if not raw_text:
@@ -875,6 +903,8 @@ class MainWindow(QMainWindow):
         self.btn_start_calib.setText("开始校准")
         self.sync_calib_ui_state()
 
+        if hasattr(self, 'cl500_worker'):
+            self.cl500_worker.close_device()
         self.log_to_terminal("校准任务已结束", "#5DADE2")
 
     def get_serial_config(self):

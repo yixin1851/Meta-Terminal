@@ -1,8 +1,10 @@
 import json
 import os
+import sys
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
+from CL500_thread import IlluminanceWorker
 
 
 class AnimatedPanel(QFrame):
@@ -59,6 +61,9 @@ class MultiSendPanel(AnimatedPanel):
 
     def __init__(self, parent, width=320, serial_worker=None):  # 增加基础宽度至 320
         super().__init__(parent, width, direction="left")
+        self.main_window = parent
+        self.cl500_worker = None
+        self.cl500_thread = None
 
         self.rows = []
         self.loop_timer = QTimer()
@@ -97,33 +102,79 @@ class MultiSendPanel(AnimatedPanel):
         self.content_container.setFixedWidth(self.panel_width)
 
         layout = QVBoxLayout(self.content_container)
-        layout.setContentsMargins(8, 10, 8, 10)
-        layout.setSpacing(12)
-
-        # --- Top Options ---
-        top_layout = QHBoxLayout()
-        self.check_loop = QCheckBox("Loop Send")
-        top_layout.addWidget(self.check_loop)
-        top_layout.addStretch()
-        layout.addLayout(top_layout)
+        layout.setContentsMargins(2, 5, 2, 5)
+        layout.setSpacing(10)
 
         # 修改：增加一个“Add Row”按钮在顶部
         top_layout = QHBoxLayout()
         self.check_loop = QCheckBox("Loop Send")
         self.check_loop.stateChanged.connect(self._toggle_loop)
 
-        self.btn_add = QPushButton("+ Add")
-        self.btn_add.setFixedWidth(60)
-        self.btn_add.clicked.connect(lambda: self.add_command_row())
+        self.btn_init_cl500 = QPushButton("初始化")
+        self.btn_init_cl500.setFixedWidth(70)
+        # 样式美化（可选）：让按钮看起来更有科技感
+        self.btn_init_cl500.setStyleSheet(
+            "QPushButton { background-color: #007ACC; color: white; border-radius: 2px; }")
 
-        self.btn_save = QPushButton("Save")
-        self.btn_save.setFixedWidth(60)
-        self.btn_save.clicked.connect(self.save_settings)
+
+        self.btn_init_cl500.clicked.connect(self.on_init_cl500_clicked)
+
+
+        self.btn_read_cl500 = QPushButton("读取CL500")
+        self.btn_read_cl500.setFixedWidth(100)
+        self.btn_read_cl500.setStyleSheet(
+            "QPushButton { background-color: #007ACC; color: white; border-radius: 2px; }")
+
+        self.btn_read_cl500.clicked.connect(self.on_read_cl500_clicked)
+
+        # 1. 使用 QLineEdit 代替 QTextEdit
+        self.times_edit = QLineEdit()
+        self.times_edit.setPlaceholderText("次数")  # 使用占位符，而不是直接填文字
+        self.times_edit.setFixedWidth(35)
+        # 2. 限制高度，使其与按钮对齐
+        self.times_edit.setFixedHeight(25)
+        # 3. 设置深色样式，使其融入背景
+        self.times_edit.setStyleSheet("""
+            QLineEdit {
+                background-color: #333;
+                color: white;
+                border: 1px solid #555;
+                padding-left: 2px;
+            }
+        """)
 
         top_layout.addWidget(self.check_loop)
         top_layout.addStretch()
-        top_layout.addWidget(self.btn_add)
-        top_layout.addWidget(self.btn_save)
+        top_layout.addWidget(self.btn_init_cl500)
+        top_layout.addWidget(self.btn_read_cl500)
+        top_layout.addWidget(self.times_edit)
+
+        layout.addLayout(top_layout)
+
+        # 定义按钮样式，包含：默认、悬停、按下 三种状态
+        btn_style = """
+            QPushButton {
+                background-color: #007ACC; 
+                color: white; 
+                border-radius: 3px;
+                border: none;
+                padding: 4px;
+            }
+            QPushButton:hover {
+                background-color: #1A91FF; /* 鼠标悬停时：颜色变亮一点 */
+            }
+            QPushButton:pressed {
+                background-color: #005A9E; /* 鼠标按下时：颜色变深一点 */
+            }
+            QPushButton:disabled {
+                background-color: #555555; /* 禁用状态：灰色 */
+                color: #888888;
+            }
+        """
+
+        # 应用到控件
+        self.btn_init_cl500.setStyleSheet(btn_style)
+        self.btn_read_cl500.setStyleSheet(btn_style)
 
         # --- Table Header ---
         # 重新分配列宽: Order(35), Hex(20), Context(Stretch), Send(50), Delay(40)
@@ -503,3 +554,108 @@ class MultiSendPanel(AnimatedPanel):
 
         except Exception as e:
             print(f"加载配置失败: {e}")
+
+    def _setup_cl500_for_sub_ui(self):
+        """仅在子 UI 需要时初始化"""
+        # 如果线程已经在跑，且 worker 存在，说明环境是好的，直接返回
+        if (hasattr(self, 'cl500_thread') and self.cl500_thread and
+                self.cl500_thread.isRunning() and self.cl500_worker):
+            return
+
+        # 1. 确定 DLL 路径 (保留你原有的逻辑)
+        if getattr(sys, 'frozen', False):
+            BASE_DIR = os.path.dirname(sys.executable)
+        else:
+            BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        DLL_RELATIVE_PATH = os.path.join(BASE_DIR, "CL500A", "bin")
+
+        # 2. 尝试创建 Worker
+        try:
+            temp_worker = IlluminanceWorker(DLL_RELATIVE_PATH)
+
+            # 检查 Worker 内部的路径检查是否通过
+            if not temp_worker.is_valid:
+                self.main_window.log_to_terminal("CL500 初始化失败：DLL 路径无效", "#E06C75")
+                return
+
+            self.cl500_worker = temp_worker
+
+        except Exception as e:
+            self.main_window.log_to_terminal(f"创建 Worker 失败: {e}", "#E06C75")
+            return
+
+        # 【关键】监听初始化结果
+        self.cl500_worker.finished_init.connect(self._on_cl500_init_result)
+        self.cl500_worker.log_signal.connect(self._handle_worker_log)
+
+        # 3. 只有成功创建并验证后，才开始配置线程
+        self.cl500_thread = QThread()
+        self.cl500_worker.moveToThread(self.cl500_thread)
+
+        # # 【核心】绑定日志到主 UI 的黑框
+        # self.cl500_worker.log_signal.connect(
+        #     lambda msg: self.main_window.log_to_terminal(f"[子功能] {msg}", "#E5C07B")
+        # )
+
+        self.cl500_thread.start()
+        self.main_window.log_to_terminal("CL500 线程已安全启动", "#61AFEF")
+
+    def _on_cl500_init_result(self, success):
+        """当初始化返回结果时调用"""
+        if not success:
+            self.main_window.log_to_terminal("检测到初始化失败，正在释放 CL500 线程资源...", "#E06C75")
+            # 优雅地退出线程
+            if self.cl500_thread:
+                self.cl500_thread.quit()
+                self.cl500_thread.wait()
+            self.cl500_worker = None
+            self.cl500_thread = None
+            self.main_window.log_to_terminal("释放 CL500 线程资源完毕", "#E06C75")
+        else:
+            self.main_window.log_to_terminal("CL500 环境准备就绪，线程持续运行中。", "#98C379")
+
+    def on_init_cl500_clicked(self):
+        self._setup_cl500_for_sub_ui()
+        # 如果已经初始化成功了，就不要重复初始化
+        if self.cl500_worker.is_initialized:
+            self.main_window.log_to_terminal("CL500 已在线，无需重复初始化。", "#98C379")
+            return
+        # 直接发射信号，Qt 会自动处理跨线程投递，不需要 invokeMethod
+        self.cl500_worker.sig_do_init.emit()
+
+    def on_read_cl500_clicked(self):
+        """点击读取按钮时的逻辑"""
+        # 1. 在点击的瞬间获取最新的输入框内容
+        raw_text = self.times_edit.text().strip()
+
+        # 2. 处理默认值逻辑
+        # 如果用户没填，或者是占位符文字，则默认为 1
+        if not raw_text or raw_text == '次数':
+            n = 1
+        else:
+            try:
+                n = int(raw_text)
+            except ValueError:
+                self.main_window.log_to_terminal("次数格式错误，请输入数字", "#E06C75")
+                return
+
+        # 3. 检查 Worker 状态并执行
+        if self.cl500_worker and self.cl500_worker.is_initialized:
+            self.main_window.log_to_terminal(f"开始读取 CL500A，共 {n} 次...", "#D19A66")
+            self.cl500_worker.sig_do_measure.emit(n)
+        else:
+            self.main_window.log_to_terminal("请先完成初始化！", "#E06C75")
+
+    # 在 MultiSendPanel 类中添加这个函数
+    def _handle_worker_log(self, msg):
+        """
+        处理来自 CL500 Worker 的日志信号
+        msg: Worker 传过来的字符串内容
+        """
+        if hasattr(self, 'main_window') and self.main_window:
+            # 调用主窗口的打印函数，将信息显示在黑框
+            # 这里建议加个前缀，方便分辨是子面板发出的信息
+            self.main_window.log_to_terminal(f"[CL500] {msg}", "#E5C07B")
+        else:
+            # 如果找不到主窗口引用，就先打印到控制台保底
+            print(f"Worker Log (No UI): {msg}")
