@@ -2,7 +2,7 @@ import os
 import time
 import ctypes
 import logging
-from PySide6.QtCore import QObject, Signal, Slot, QThread
+from PySide6.QtCore import QObject, Signal, Slot, QThread,Qt
 
 # ================= SDK 常量定义 =================
 SUCCESS = 0
@@ -33,17 +33,18 @@ class SignalHandler(logging.Handler):
 class CL_EvxyDATA(ctypes.Structure):
     _fields_ = [("Ev", ctypes.c_float), ("x", ctypes.c_float), ("y", ctypes.c_float)]
 
-
 class CL_EvTduvDATA(ctypes.Structure):
     _fields_ = [("Ev", ctypes.c_float), ("Tcp", ctypes.c_float), ("duv", ctypes.c_float)]
 
-
+# 使用 ctypes.Union 来完美还原 C++ 的定义
 class CL_MEASDATA(ctypes.Union):
     _fields_ = [
         ("Evxy", CL_EvxyDATA),
         ("EvTduv", CL_EvTduvDATA),
-        ("padding", ctypes.c_byte * 512)
+        # 如果需要其他成员，可以在此继续添加
+        ("padding", ctypes.c_byte * 8192) # 这里写512程序老奔溃，写2048以上就没问题，当一个CL500的经验教训吧
     ]
+
 
 
 # ================= 业务逻辑线程类 =================
@@ -57,9 +58,7 @@ class IlluminanceWorker(QObject):
     finished_init = Signal(bool)
     measure_done_signal = Signal()
 
-    # 定义控制信号
-    sig_do_init = Signal()
-    sig_do_measure = Signal(int)
+
 
     def __init__(self, dll_folder):
         super().__init__()
@@ -70,8 +69,9 @@ class IlluminanceWorker(QObject):
         self._is_running = False
 
         # 在初始化时，把信号连到自己的函数上
-        self.sig_do_init.connect(self.init_sdk_not_calib)
-        self.sig_do_measure.connect(self.start_measure_task)
+        # self.sig_do_init.connect(self.init_sdk_not_calib)
+        # self.sig_do_measure.connect(self.start_measure_task)
+        # self.sig_do_measure.connect(self.start_measure_task, Qt.QueuedConnection)
 
         # 配置专属于该类的 Logger，避免污染全局 logging
         self.logger = logging.getLogger(f"CL500A_{id(self)}")
@@ -153,12 +153,20 @@ class IlluminanceWorker(QObject):
 
             self.cl_api = ctypes.CDLL(dll_path)
 
+
             # 1. 打开设备
             if self.cl_api.CLOpenDevice(ctypes.byref(self.handle)) == SUCCESS:
                 self.cl_api.CLSetRemoteMode(self.handle, 1)
 
+                # 尝试设置色温模式 (0:JIS, 1:ANSI)，增强稳定性
+                try:
+                    self.cl_api.CLSetTcpMode(self.handle, 0)
+                except:
+                    pass
+
                 self.logger.info("CL500A设备连接成功...")
                 self.is_initialized = True
+                self.finished_init.emit(True)
             else:
                 self.logger.error("错误：未检测到CL500A设备，请检查 USB 连接或驱动。")
                 self.finished_init.emit(False)
@@ -172,6 +180,8 @@ class IlluminanceWorker(QObject):
 
     @Slot(int)
     def start_measure_task(self, n):
+        import threading
+        print(f"DEBUG: 测量任务正在线程 {threading.current_thread().name} (ID: {threading.get_native_id()}) 中运行")
         """执行 n 次测量并计算平均值"""
         if not self.is_initialized:
             self.logger.warning("CL500A设备未就绪，请先执行初始化。")
@@ -207,10 +217,13 @@ class IlluminanceWorker(QObject):
                     time.sleep(0.1)
 
                 if success:
+                    print("准备GetData")
                     data = CL_MEASDATA()
+                    print("结构体大小:", ctypes.sizeof(data))
                     self.cl_api.CLGetMeasData(self.handle, CL_COLORSPACE_EVTCPDUV, ctypes.byref(data))
 
-                    lux, tcp = data.Evxy.Ev, data.EvTduv.Tcp
+                    lux = data.Evxy.Ev  # 或者 data.EvTduv.Ev，它们是同一个值
+                    tcp = data.EvTduv.Tcp  # 现在 Tcp 对应正确的偏移量 4 字节
 
                     # 数据合法性基本过滤
                     if lux < INVALID_VAL and tcp < INVALID_VAL:
@@ -224,7 +237,7 @@ class IlluminanceWorker(QObject):
             else:
                 self.logger.error(f"[{i + 1}/{n}] 错误: 触发指令失败 (Code: {ret})。")
 
-            time.sleep(0.05)
+            time.sleep(0.1)
 
         # --- 最终统计逻辑 ---
         if measurements:

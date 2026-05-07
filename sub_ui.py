@@ -58,6 +58,9 @@ class AnimatedPanel(QFrame):
 class MultiSendPanel(AnimatedPanel):
     # 定义一个信号，用于将指令发送给串口逻辑层
     data_ready_to_send = Signal(dict)
+    # 定义控制信号
+    sig_do_init = Signal()
+    sig_do_measure = Signal(int)
 
     def __init__(self, parent, width=320, serial_worker=None):  # 增加基础宽度至 320
         super().__init__(parent, width, direction="left")
@@ -569,6 +572,7 @@ class MultiSendPanel(AnimatedPanel):
             BASE_DIR = os.path.dirname(os.path.abspath(__file__))
         DLL_RELATIVE_PATH = os.path.join(BASE_DIR, "CL500A", "bin")
 
+        self.cl500_thread = QThread()
         # 2. 尝试创建 Worker
         try:
             temp_worker = IlluminanceWorker(DLL_RELATIVE_PATH)
@@ -583,22 +587,25 @@ class MultiSendPanel(AnimatedPanel):
         except Exception as e:
             self.main_window.log_to_terminal(f"创建 Worker 失败: {e}", "#E06C75")
             return
+        cl500_worker = IlluminanceWorker(DLL_RELATIVE_PATH)
+
+        # 3. 只有成功创建并验证后，才开始配置线程
+        self.cl500_worker.moveToThread(self.cl500_thread)
 
         # 【关键】监听初始化结果
         self.cl500_worker.finished_init.connect(self._on_cl500_init_result)
         self.cl500_worker.log_signal.connect(self._handle_worker_log)
 
-        # 3. 只有成功创建并验证后，才开始配置线程
-        self.cl500_thread = QThread()
-        self.cl500_worker.moveToThread(self.cl500_thread)
+        self.sig_do_init.connect(self.cl500_worker.init_sdk_not_calib)
+        self.sig_do_measure.connect(self.cl500_worker.start_measure_task)
 
         # # 【核心】绑定日志到主 UI 的黑框
         # self.cl500_worker.log_signal.connect(
         #     lambda msg: self.main_window.log_to_terminal(f"[子功能] {msg}", "#E5C07B")
         # )
-
+        # self.main_window.log_to_terminal("CL500 线程已安全启动", "#61AFEF")
         self.cl500_thread.start()
-        self.main_window.log_to_terminal("CL500 线程已安全启动", "#61AFEF")
+
 
     def _on_cl500_init_result(self, success):
         """当初始化返回结果时调用"""
@@ -621,7 +628,7 @@ class MultiSendPanel(AnimatedPanel):
             self.main_window.log_to_terminal("CL500 已在线，无需重复初始化。", "#98C379")
             return
         # 直接发射信号，Qt 会自动处理跨线程投递，不需要 invokeMethod
-        self.cl500_worker.sig_do_init.emit()
+        self.sig_do_init.emit()
 
     def on_read_cl500_clicked(self):
         """点击读取按钮时的逻辑"""
@@ -642,7 +649,7 @@ class MultiSendPanel(AnimatedPanel):
         # 3. 检查 Worker 状态并执行
         if self.cl500_worker and self.cl500_worker.is_initialized:
             self.main_window.log_to_terminal(f"开始读取 CL500A，共 {n} 次...", "#D19A66")
-            self.cl500_worker.sig_do_measure.emit(n)
+            self.sig_do_measure.emit(n)
         else:
             self.main_window.log_to_terminal("请先完成初始化！", "#E06C75")
 
