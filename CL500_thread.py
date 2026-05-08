@@ -55,8 +55,9 @@ class IlluminanceWorker(QObject):
     avg_result_signal = Signal(float, float)  # 平均 Lux, Tcp
     # 状态信号
     log_signal = Signal(str)  # 统一的日志信号
-    finished_init = Signal(bool)
+    finished_init = Signal(bool) # 未校准初始化
     measure_done_signal = Signal()
+    finished_init_cl500_calib = Signal(bool) #校准初始化
 
 
 
@@ -105,8 +106,8 @@ class IlluminanceWorker(QObject):
                 dll_path = os.path.join(self.dll_folder, "libclapi.dll")
                 if not os.path.exists(dll_path):
                     self.logger.error(f"找不到 DLL 文件: {dll_path}")
-                    self.finished_init.emit(False)
-                    return False
+                    self.finished_init_cl500_calib.emit(False)
+
                 self.cl_api = ctypes.CDLL(dll_path)
 
             # --- 2. 设备连接逻辑 ---
@@ -117,8 +118,8 @@ class IlluminanceWorker(QObject):
                     self.logger.info("CL500A设备连接成功。")
                 else:
                     self.logger.error("错误：未检测到CL500A设备，请检查 USB 连接。")
-                    self.finished_init.emit(False)
-                    return False
+                    self.finished_init_cl500_calib.emit(False)
+
             else:
                 self.logger.info("设备已处于连接状态，准备开始重新校准...")
 
@@ -156,14 +157,14 @@ class IlluminanceWorker(QObject):
                 self.cl_api.CLPollingCalibration(self.handle, ctypes.byref(c_status))
 
             self.is_initialized = True
-            self.finished_init.emit(True)
+            self.finished_init_cl500_calib.emit(True)
             self.logger.info("CL500A照度计零校准完成。")
-            return True
+
 
         except Exception as e:
             self.logger.exception(f"CL500A初始化/校准异常: {str(e)}")
-            self.finished_init.emit(False)
-            return False
+            self.finished_init_cl500_calib.emit(False)
+
 
     @Slot()
     def init_sdk_not_calib(self):

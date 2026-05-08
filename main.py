@@ -203,7 +203,8 @@ class CalibrationLineEdit(QLineEdit):
 
 class MainWindow(QMainWindow):
     sig_do_measure = Signal(int)
-    sig_do_init = Signal()
+    sig_do_init_cl500_calib = Signal()
+    sig_do_init_cl500_not_calib = Signal()
 
     def __init__(self):
         super().__init__()
@@ -270,11 +271,13 @@ class MainWindow(QMainWindow):
         # self.cl500_worker.init_sdk_not_calib()
 
         # 【关键】监听初始化结果
+        self.cl500_worker.finished_init_cl500_calib.connect(self._on_cl500_hardware_ready)
         self.cl500_worker.finished_init.connect(self._on_cl500_init_result)
         # self.cl500_worker.log_signal.connect(lambda msg: self.log_to_terminal(f"[CL500] {msg}", "#E5C07B"))
         self.cl500_worker.log_signal.connect(self._handle_worker_log, Qt.QueuedConnection)
 
-        self.sig_do_init.connect(self.cl500_worker.init_sdk_not_calib)
+        self.sig_do_init_cl500_not_calib.connect(self.cl500_worker.init_sdk_not_calib)
+        self.sig_do_init_cl500_calib.connect(self.cl500_worker.init_sdk)
 
         # # 【核心】绑定日志到主 UI 的黑框
         # self.cl500_worker.log_signal.connect(
@@ -282,7 +285,7 @@ class MainWindow(QMainWindow):
         # )
         # self.main_window.log_to_terminal("CL500 线程已安全启动", "#61AFEF")
         self.cl500_thread.start()
-        self.left_panel.btn_init_cl500.setEnabled(True)
+
         self.sig_do_measure.connect(self.cl500_worker.start_measure_task)
         # print(f"信号连接状态: {self.sig_do_measure}")
 
@@ -290,7 +293,7 @@ class MainWindow(QMainWindow):
         # 使用 Timer 是为了确保在线程启动完成后调用
         # QTimer.singleShot(500, self.cl500_worker.init_sdk_not_calib)
         # 修改最后一行，确保初始化也在子线程跑，且不阻塞 UI
-        QTimer.singleShot(500, lambda: self.sig_do_init.emit())
+        QTimer.singleShot(500, lambda: self.sig_do_init_cl500_not_calib.emit())
 
     def _on_cl500_init_result(self, success):
         """当初始化返回结果时调用"""
@@ -732,7 +735,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.btn_start_calib)
 
         # --- 逻辑绑定 ---
-        self.cb_calibration.toggled.connect(self.sync_calib_ui_state)
+        self.cb_calibration.toggled.connect(self.cb_calibration_check)
         # 关键：监听下拉框切换模式 (必须加这一行，否则切换 Lux 到 CL500 时没反应)
         self.combo_calib_mode.currentIndexChanged.connect(self.sync_calib_ui_state)
         self.btn_start_calib.clicked.connect(self.on_start_calibration_clicked)
@@ -810,22 +813,7 @@ class MainWindow(QMainWindow):
         if self.serial_worker and self.serial_worker.running:
             self.serial_worker.send_async(full_cmd)
 
-
-    def sync_calib_ui_state(self):
-
-        self.finalize_ui_unlock()
-        self.log_to_terminal("正在检测设备连接...", "#D19A66")
-
-        current_mode = self.combo_calib_mode.currentText()  # 获取当前选择的模式
-        if current_mode == "CL500":
-            self.log_to_terminal("========================================", "#E06C75")
-            self.log_to_terminal("[重要提示] 当前处于 CL-500A 校准模式", "#E06C75")
-            self.log_to_terminal("启动校准前，请确保照度计【遮光罩已关闭】或【传感器完全遮蔽】！", "#E5C07B")
-            self.log_to_terminal("零校准失败将导致后续所有数据异常。", "#E5C07B")
-            self.log_to_terminal("========================================", "#E06C75")
-
-        return
-        """量产校准模式 Checkbox 切换逻辑"""
+    def cb_calibration_check(self):
         master_on = self.cb_calibration.isChecked()
 
         if master_on:
@@ -862,6 +850,35 @@ class MainWindow(QMainWindow):
 
             self.btn_start_calib.setEnabled(False)
             self.btn_start_calib.setText("开始校准")
+
+
+    def sync_calib_ui_state(self):
+
+        # self.finalize_ui_unlock()
+        # self.log_to_terminal("正在检测设备连接...", "#D19A66")
+
+        current_mode = self.combo_calib_mode.currentText()  # 获取当前选择的模式
+        if current_mode == "CL500":
+            self.log_to_terminal("========================================", "#E06C75")
+            self.log_to_terminal("[重要提示] 当前处于 CL-500A 校准模式", "#E06C75")
+            self.log_to_terminal("启动校准前，请确保照度计【遮光罩已关闭】或【传感器完全遮蔽】！", "#E5C07B")
+            self.log_to_terminal("零校准失败将导致后续所有数据异常。", "#E5C07B")
+            self.log_to_terminal("========================================", "#E06C75")
+        # return
+
+        master_on = self.cb_calibration.isChecked()
+
+        if not master_on:
+            self._waiting_for_echo = False
+            self.combo_calib_mode.setEnabled(False)
+            self.edit_calib_points.setEnabled(False)
+            self.edit_calib_points.clear()
+            self.edit_calib_points.setPlaceholderText("请开启量产校准模式")
+            self.edit_calib_points.setStyleSheet("background-color: #333; color: #666;")
+
+            self.btn_start_calib.setEnabled(False)
+            self.btn_start_calib.setText("开始校准")
+
 
     def finalize_ui_unlock(self):
         """回显成功后，真正根据模式逻辑解锁 UI 并变亮"""
@@ -932,11 +949,39 @@ class MainWindow(QMainWindow):
             self.btn_start_calib.setEnabled(master_on and any_rb_checked)
 
     def on_start_calibration_clicked(self):
+
+        raw_text = self.edit_calib_points.text().strip(',')
+        if not raw_text:
+            QMessageBox.critical(self, "错误", "请输入校准点位！")
+            return
+
         """点击开始校准后的逻辑"""
         current_mode = self.combo_calib_mode.currentText()  # 获取当前选择的模式
+
+        # 锁定 UI 防止二次点击
+        self.cb_calibration.setEnabled(False)
+        self.btn_start_calib.setEnabled(False)
+        self.btn_start_calib.setText("校准中...")
+
         if current_mode == "CL500":
-            if not self.cl500_worker.init_sdk():
-                return
+            # 发射信号触发子线程中的初始化
+            self.sig_do_init_cl500_calib.emit()
+            return
+        else:
+            # 如果是其他模式（如普通读取模式），直接进入第二阶段
+            self._start_logic_calibration_process()
+
+    def _on_cl500_hardware_ready(self, success):
+        """回调函数：硬件校准完成后被触发"""
+        if success:
+            self.log_to_terminal("CL500 硬件就绪，开始执行逻辑校准流程...", "#98C379")
+            self._start_logic_calibration_process()
+        else:
+            self.log_to_terminal("CL500 硬件初始化失败，流程终止", "#E06C75")
+            self.btn_start_calib.setEnabled(True)
+            self.btn_start_calib.setText("开始校准")
+
+    def _start_logic_calibration_process(self):
         # 1. 获取当前选择的模式
         mode = self.combo_calib_mode.currentText()
         # 2. 获取并清洗点位数据
@@ -951,12 +996,6 @@ class MainWindow(QMainWindow):
         except ValueError:
             QMessageBox.warning(self, "格式错误", "点位列表包含非法字符，请检查数字格式")
             return
-
-        # 3. 锁定 UI 防止二次点击
-        self.cb_calibration.setEnabled(False)
-        self.btn_start_calib.setEnabled(False)
-        self.btn_start_calib.setText("校准中...")
-
         # 4. 创建并启动线程
         self.calib_thread = CalibrationThread(mode, val_list, self.serial_worker)
 
@@ -967,6 +1006,7 @@ class MainWindow(QMainWindow):
         self.log_to_terminal(f"启动 {mode} 模式校准，目标点位: {val_list}", "#D19A66")
         self.calib_thread.start()
 
+
     def on_calibration_finished(self, result_msg):
         """校准结束的回调"""
         QMessageBox.information(self, "任务结束", f"<b>校准结果:</b><br>{result_msg}")
@@ -975,6 +1015,7 @@ class MainWindow(QMainWindow):
         self.cb_calibration.setEnabled(True)
         self.cb_calibration.setChecked(False)  # 自动关闭校准开关
         self.btn_start_calib.setText("开始校准")
+        self.btn_start_calib.setEnabled(True)
         self.sync_calib_ui_state()
 
         # if hasattr(self, 'cl500_worker'):

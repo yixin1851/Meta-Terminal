@@ -115,14 +115,14 @@ class MultiSendPanel(AnimatedPanel):
         self.check_loop = QCheckBox("Loop Send")
         self.check_loop.stateChanged.connect(self._toggle_loop)
 
-        self.btn_init_cl500 = QPushButton("初始化")
-        self.btn_init_cl500.setFixedWidth(70)
-        # 样式美化（可选）：让按钮看起来更有科技感
-        self.btn_init_cl500.setStyleSheet(
-            "QPushButton { background-color: #007ACC; color: white; border-radius: 2px; }")
-
-
-        self.btn_init_cl500.clicked.connect(self.on_init_cl500_clicked)
+        # self.btn_init_cl500 = QPushButton("初始化")
+        # self.btn_init_cl500.setFixedWidth(70)
+        # # 样式美化（可选）：让按钮看起来更有科技感
+        # self.btn_init_cl500.setStyleSheet(
+        #     "QPushButton { background-color: #007ACC; color: white; border-radius: 2px; }")
+        #
+        #
+        # self.btn_init_cl500.clicked.connect(self.on_init_cl500_clicked)
 
 
         self.btn_read_cl500 = QPushButton("读取CL500")
@@ -179,7 +179,7 @@ class MultiSendPanel(AnimatedPanel):
         """
 
         # 应用到控件
-        self.btn_init_cl500.setStyleSheet(btn_style)
+        # self.btn_init_cl500.setStyleSheet(btn_style)
         self.btn_read_cl500.setStyleSheet(btn_style)
 
         # --- Table Header ---
@@ -561,79 +561,79 @@ class MultiSendPanel(AnimatedPanel):
         except Exception as e:
             print(f"加载配置失败: {e}")
 
-    def _setup_cl500_for_sub_ui(self):
-        """仅在子 UI 需要时初始化"""
-        # 如果线程已经在跑，且 worker 存在，说明环境是好的，直接返回
-        if (hasattr(self, 'cl500_thread') and self.cl500_thread and
-                self.cl500_thread.isRunning() and self.cl500_worker):
-            return
+    # def _setup_cl500_for_sub_ui(self):
+    #     """仅在子 UI 需要时初始化"""
+    #     # 如果线程已经在跑，且 worker 存在，说明环境是好的，直接返回
+    #     if (hasattr(self, 'cl500_thread') and self.cl500_thread and
+    #             self.cl500_thread.isRunning() and self.cl500_worker):
+    #         return
+    #
+    #     # 1. 确定 DLL 路径 (保留你原有的逻辑)
+    #     if getattr(sys, 'frozen', False):
+    #         BASE_DIR = os.path.dirname(sys.executable)
+    #     else:
+    #         BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    #     DLL_RELATIVE_PATH = os.path.join(BASE_DIR, "CL500A", "bin")
+    #
+    #     self.cl500_thread = QThread()
+    #     # 2. 尝试创建 Worker
+    #     try:
+    #         temp_worker = IlluminanceWorker(DLL_RELATIVE_PATH)
+    #
+    #         # 检查 Worker 内部的路径检查是否通过
+    #         if not temp_worker.is_valid:
+    #             self.main_window.log_to_terminal("CL500 初始化失败：DLL 路径无效", "#E06C75")
+    #             return
+    #
+    #         self.cl500_worker = temp_worker
+    #
+    #     except Exception as e:
+    #         self.main_window.log_to_terminal(f"创建 Worker 失败: {e}", "#E06C75")
+    #         return
+    #
+    #     # 3. 只有成功创建并验证后，才开始配置线程
+    #     self.cl500_worker.moveToThread(self.cl500_thread)
+    #     self.cl500_worker.init_sdk_not_calib()
+    #
+    #     # 【关键】监听初始化结果
+    #     self.cl500_worker.finished_init.connect(self._on_cl500_init_result)
+    #     self.cl500_worker.log_signal.connect(self._handle_worker_log)
+    #
+    #     self.sig_do_init.connect(self.cl500_worker.init_sdk_not_calib)
+    #     self.sig_do_measure.connect(self.cl500_worker.start_measure_task)
+    #
+    #     # # 【核心】绑定日志到主 UI 的黑框
+    #     # self.cl500_worker.log_signal.connect(
+    #     #     lambda msg: self.main_window.log_to_terminal(f"[子功能] {msg}", "#E5C07B")
+    #     # )
+    #     # self.main_window.log_to_terminal("CL500 线程已安全启动", "#61AFEF")
+    #     self.cl500_thread.start()
+    #     self.btn_read_cl500.setEnabled(True)
 
-        # 1. 确定 DLL 路径 (保留你原有的逻辑)
-        if getattr(sys, 'frozen', False):
-            BASE_DIR = os.path.dirname(sys.executable)
-        else:
-            BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-        DLL_RELATIVE_PATH = os.path.join(BASE_DIR, "CL500A", "bin")
 
-        self.cl500_thread = QThread()
-        # 2. 尝试创建 Worker
-        try:
-            temp_worker = IlluminanceWorker(DLL_RELATIVE_PATH)
+    # def _on_cl500_init_result(self, success):
+    #     """当初始化返回结果时调用"""
+    #     if not success:
+    #         self.main_window.log_to_terminal("检测到初始化失败，正在释放 CL500 线程资源...", "#E06C75")
+    #         # 优雅地退出线程
+    #         if self.cl500_thread:
+    #             self.cl500_thread.quit()
+    #             self.cl500_thread.wait()
+    #         self.cl500_worker = None
+    #         self.cl500_thread = None
+    #         self.main_window.log_to_terminal("释放 CL500 线程资源完毕", "#E06C75")
+    #     else:
+    #         self.btn_read_cl500.setEnabled(True)
+    #         self.main_window.log_to_terminal("CL500 环境准备就绪...", "#98C379")
 
-            # 检查 Worker 内部的路径检查是否通过
-            if not temp_worker.is_valid:
-                self.main_window.log_to_terminal("CL500 初始化失败：DLL 路径无效", "#E06C75")
-                return
-
-            self.cl500_worker = temp_worker
-
-        except Exception as e:
-            self.main_window.log_to_terminal(f"创建 Worker 失败: {e}", "#E06C75")
-            return
-
-        # 3. 只有成功创建并验证后，才开始配置线程
-        self.cl500_worker.moveToThread(self.cl500_thread)
-        self.cl500_worker.init_sdk_not_calib()
-
-        # 【关键】监听初始化结果
-        self.cl500_worker.finished_init.connect(self._on_cl500_init_result)
-        self.cl500_worker.log_signal.connect(self._handle_worker_log)
-
-        self.sig_do_init.connect(self.cl500_worker.init_sdk_not_calib)
-        self.sig_do_measure.connect(self.cl500_worker.start_measure_task)
-
-        # # 【核心】绑定日志到主 UI 的黑框
-        # self.cl500_worker.log_signal.connect(
-        #     lambda msg: self.main_window.log_to_terminal(f"[子功能] {msg}", "#E5C07B")
-        # )
-        # self.main_window.log_to_terminal("CL500 线程已安全启动", "#61AFEF")
-        self.cl500_thread.start()
-        self.btn_read_cl500.setEnabled(True)
-
-
-    def _on_cl500_init_result(self, success):
-        """当初始化返回结果时调用"""
-        if not success:
-            self.main_window.log_to_terminal("检测到初始化失败，正在释放 CL500 线程资源...", "#E06C75")
-            # 优雅地退出线程
-            if self.cl500_thread:
-                self.cl500_thread.quit()
-                self.cl500_thread.wait()
-            self.cl500_worker = None
-            self.cl500_thread = None
-            self.main_window.log_to_terminal("释放 CL500 线程资源完毕", "#E06C75")
-        else:
-            self.btn_read_cl500.setEnabled(True)
-            self.main_window.log_to_terminal("CL500 环境准备就绪...", "#98C379")
-
-    def on_init_cl500_clicked(self):
-        self._setup_cl500_for_sub_ui()
-        # 如果已经初始化成功了，就不要重复初始化
-        if self.cl500_worker.is_initialized:
-            self.main_window.log_to_terminal("CL500 已在线，无需重复初始化。", "#98C379")
-            return
-        # 直接发射信号，Qt 会自动处理跨线程投递，不需要 invokeMethod
-        self.sig_do_init.emit()
+    # def on_init_cl500_clicked(self):
+    #     self._setup_cl500_for_sub_ui()
+    #     # 如果已经初始化成功了，就不要重复初始化
+    #     if self.cl500_worker.is_initialized:
+    #         self.main_window.log_to_terminal("CL500 已在线，无需重复初始化。", "#98C379")
+    #         return
+    #     # 直接发射信号，Qt 会自动处理跨线程投递，不需要 invokeMethod
+    #     self.sig_do_init.emit()
 
     def on_read_cl500_clicked(self):
         """点击读取按钮时的逻辑"""
@@ -653,7 +653,7 @@ class MultiSendPanel(AnimatedPanel):
 
         # 3. 检查 Worker 状态并执行
         if self.main_window.cl500_worker and self.main_window.cl500_worker.is_initialized:
-            self.main_window.log_to_terminal(f"开始读取 CL500A，共 {n} 次...", "#D19A66")
+            # self.main_window.log_to_terminal(f"开始读取 CL500A，共 {n} 次...", "#D19A66")
             self.main_window.sig_do_measure.emit(n)
             self.btn_read_cl500.setText("读取CL500...")
             self.btn_read_cl500.setEnabled(False)
@@ -661,15 +661,15 @@ class MultiSendPanel(AnimatedPanel):
             self.main_window.log_to_terminal("请先完成初始化！", "#E06C75")
 
     # 在 MultiSendPanel 类中添加这个函数
-    def _handle_worker_log(self, msg):
-        """
-        处理来自 CL500 Worker 的日志信号
-        msg: Worker 传过来的字符串内容
-        """
-        if hasattr(self, 'main_window') and self.main_window:
-            # 调用主窗口的打印函数，将信息显示在黑框
-            # 这里建议加个前缀，方便分辨是子面板发出的信息
-            self.main_window.log_to_terminal(f"[CL500] {msg}", "#E5C07B")
-        else:
-            # 如果找不到主窗口引用，就先打印到控制台保底
-            print(f"Worker Log (No UI): {msg}")
+    # def _handle_worker_log(self, msg):
+    #     """
+    #     处理来自 CL500 Worker 的日志信号
+    #     msg: Worker 传过来的字符串内容
+    #     """
+    #     if hasattr(self, 'main_window') and self.main_window:
+    #         # 调用主窗口的打印函数，将信息显示在黑框
+    #         # 这里建议加个前缀，方便分辨是子面板发出的信息
+    #         self.main_window.log_to_terminal(f"[CL500] {msg}", "#E5C07B")
+    #     else:
+    #         # 如果找不到主窗口引用，就先打印到控制台保底
+    #         print(f"Worker Log (No UI): {msg}")
