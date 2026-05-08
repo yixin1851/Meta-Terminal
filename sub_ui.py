@@ -4,6 +4,7 @@ import sys
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
+
 from CL500_thread import IlluminanceWorker
 
 
@@ -99,6 +100,7 @@ class MultiSendPanel(AnimatedPanel):
         """)
         self.setup_multi_send_ui()
 
+
     def setup_multi_send_ui(self):
         # 1. 内胆锁定固定宽度
         self.content_container = QWidget()
@@ -125,6 +127,7 @@ class MultiSendPanel(AnimatedPanel):
 
         self.btn_read_cl500 = QPushButton("读取CL500")
         self.btn_read_cl500.setFixedWidth(100)
+        self.btn_read_cl500.setEnabled(False)
         self.btn_read_cl500.setStyleSheet(
             "QPushButton { background-color: #007ACC; color: white; border-radius: 2px; }")
 
@@ -148,7 +151,7 @@ class MultiSendPanel(AnimatedPanel):
 
         top_layout.addWidget(self.check_loop)
         top_layout.addStretch()
-        top_layout.addWidget(self.btn_init_cl500)
+        # top_layout.addWidget(self.btn_init_cl500)
         top_layout.addWidget(self.btn_read_cl500)
         top_layout.addWidget(self.times_edit)
 
@@ -587,10 +590,10 @@ class MultiSendPanel(AnimatedPanel):
         except Exception as e:
             self.main_window.log_to_terminal(f"创建 Worker 失败: {e}", "#E06C75")
             return
-        cl500_worker = IlluminanceWorker(DLL_RELATIVE_PATH)
 
         # 3. 只有成功创建并验证后，才开始配置线程
         self.cl500_worker.moveToThread(self.cl500_thread)
+        self.cl500_worker.init_sdk_not_calib()
 
         # 【关键】监听初始化结果
         self.cl500_worker.finished_init.connect(self._on_cl500_init_result)
@@ -605,6 +608,7 @@ class MultiSendPanel(AnimatedPanel):
         # )
         # self.main_window.log_to_terminal("CL500 线程已安全启动", "#61AFEF")
         self.cl500_thread.start()
+        self.btn_read_cl500.setEnabled(True)
 
 
     def _on_cl500_init_result(self, success):
@@ -619,7 +623,8 @@ class MultiSendPanel(AnimatedPanel):
             self.cl500_thread = None
             self.main_window.log_to_terminal("释放 CL500 线程资源完毕", "#E06C75")
         else:
-            self.main_window.log_to_terminal("CL500 环境准备就绪，线程持续运行中。", "#98C379")
+            self.btn_read_cl500.setEnabled(True)
+            self.main_window.log_to_terminal("CL500 环境准备就绪...", "#98C379")
 
     def on_init_cl500_clicked(self):
         self._setup_cl500_for_sub_ui()
@@ -647,9 +652,11 @@ class MultiSendPanel(AnimatedPanel):
                 return
 
         # 3. 检查 Worker 状态并执行
-        if self.cl500_worker and self.cl500_worker.is_initialized:
+        if self.main_window.cl500_worker and self.main_window.cl500_worker.is_initialized:
             self.main_window.log_to_terminal(f"开始读取 CL500A，共 {n} 次...", "#D19A66")
-            self.sig_do_measure.emit(n)
+            self.main_window.sig_do_measure.emit(n)
+            self.btn_read_cl500.setText("读取CL500...")
+            self.btn_read_cl500.setEnabled(False)
         else:
             self.main_window.log_to_terminal("请先完成初始化！", "#E06C75")
 

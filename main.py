@@ -13,6 +13,9 @@ from protocol import LineProtocol
 from calib_thread import CalibrationThread # 导入新线程
 from CL500_thread import IlluminanceWorker
 from sub_ui import AnimatedPanel,MultiSendPanel
+from PySide6.QtCore import Qt
+import win32con # 需要安裝 pywin32: pip install pywin32
+import win32gui
 
 # --- 样式常量 ---
 STYLE_DARK = """
@@ -199,10 +202,14 @@ class CalibrationLineEdit(QLineEdit):
 
 
 class MainWindow(QMainWindow):
+    sig_do_measure = Signal(int)
+    sig_do_init = Signal()
+
     def __init__(self):
         super().__init__()
         self.key_buffer = ""
         self.secret_key = "YOD001"
+        self.cl500_worker = None
         # 关键：给整个窗口安装监视器
         self.installEventFilter(self)
 
@@ -212,6 +219,7 @@ class MainWindow(QMainWindow):
         self.config_file = "config/com_config.json"
         self._last_ports = [] #  关键：缓存上一次端口
 
+
         self.setup_ui()
         self.load_config()
         self.setStyleSheet(STYLE_DARK)
@@ -220,13 +228,20 @@ class MainWindow(QMainWindow):
 
         self.protocol = LineProtocol()  # 实例化协议处理器
 
-        # self._setup_cl500_workers()
+        self._setup_cl500_workers()
         # self._waiting_for_echo = False
+        self.cl500_worker.measure_done_signal.connect(self._cl500_read_btn)
+
+    def _cl500_read_btn(self):
+        self.left_panel.btn_read_cl500.setEnabled(True)
+        self.left_panel.btn_read_cl500.setText("读取CL500")
 
     def _setup_cl500_workers(self):
-        # 如果已经存在，不要重复创建
-        if hasattr(self, 'cl500_worker'):
+        # 如果线程已经在跑，且 worker 存在，说明环境是好的，直接返回
+        if (hasattr(self, 'cl500_thread') and self.cl500_thread and
+                self.cl500_thread.isRunning() and self.cl500_worker):
             return
+
         # 1. 确定 DLL 路径 (保留你原有的逻辑)
         if getattr(sys, 'frozen', False):
             BASE_DIR = os.path.dirname(sys.executable)
@@ -234,23 +249,79 @@ class MainWindow(QMainWindow):
             BASE_DIR = os.path.dirname(os.path.abspath(__file__))
         DLL_RELATIVE_PATH = os.path.join(BASE_DIR, "CL500A", "bin")
 
-        # 2. 创建线程和 Worker 实例
         self.cl500_thread = QThread()
-        self.cl500_worker = IlluminanceWorker(DLL_RELATIVE_PATH)
+        # 2. 尝试创建 Worker
+        try:
+            temp_worker = IlluminanceWorker(DLL_RELATIVE_PATH)
 
-        # 3. 将 Worker 移动到子线程
+            # 检查 Worker 内部的路径检查是否通过
+            if not temp_worker.is_valid:
+                self.main_window.log_to_terminal("CL500 初始化失败：DLL 路径无效", "#E06C75")
+                return
+
+            self.cl500_worker = temp_worker
+
+        except Exception as e:
+            self.log_to_terminal(f"创建 Worker 失败: {e}", "#E06C75")
+            return
+
+        # 3. 只有成功创建并验证后，才开始配置线程
         self.cl500_worker.moveToThread(self.cl500_thread)
+        # self.cl500_worker.init_sdk_not_calib()
 
-        # 4. 绑定信号到你的终端日志
-        # 这样 CL500 内部的所有提示都会自动显示在你的黑色终端里
-        self.cl500_worker.log_signal.connect(lambda msg: self.log_to_terminal(f"[CL500] {msg}", "#E5C07B"))
+        # 【关键】监听初始化结果
+        self.cl500_worker.finished_init.connect(self._on_cl500_init_result)
+        # self.cl500_worker.log_signal.connect(lambda msg: self.log_to_terminal(f"[CL500] {msg}", "#E5C07B"))
+        self.cl500_worker.log_signal.connect(self._handle_worker_log, Qt.QueuedConnection)
 
-        # 6. 启动线程
+        self.sig_do_init.connect(self.cl500_worker.init_sdk_not_calib)
+
+        # # 【核心】绑定日志到主 UI 的黑框
+        # self.cl500_worker.log_signal.connect(
+        #     lambda msg: self.main_window.log_to_terminal(f"[子功能] {msg}", "#E5C07B")
+        # )
+        # self.main_window.log_to_terminal("CL500 线程已安全启动", "#61AFEF")
         self.cl500_thread.start()
+        self.left_panel.btn_init_cl500.setEnabled(True)
+        self.sig_do_measure.connect(self.cl500_worker.start_measure_task)
+        # print(f"信号连接状态: {self.sig_do_measure}")
 
         # 7. 异步触发初始化 (不会卡死 UI)
         # 使用 Timer 是为了确保在线程启动完成后调用
-        QTimer.singleShot(500, self.cl500_worker.init_sdk)
+        # QTimer.singleShot(500, self.cl500_worker.init_sdk_not_calib)
+        # 修改最后一行，确保初始化也在子线程跑，且不阻塞 UI
+        QTimer.singleShot(500, lambda: self.sig_do_init.emit())
+
+    def _on_cl500_init_result(self, success):
+        """当初始化返回结果时调用"""
+        if not success:
+            self.log_to_terminal("检测到初始化失败，正在释放 CL500 线程资源...", "#E06C75")
+            # 优雅地退出线程
+            if self.cl500_thread:
+                self.cl500_thread.quit()
+                self.cl500_thread.wait()
+            self.cl500_thread = None
+            self.log_to_terminal("释放 CL500 线程资源完毕", "#E06C75")
+            self.left_panel.btn_read_cl500.setEnabled(False)
+            self.cl500_worker.close_device()
+            self.cl500_worker = None
+        else:
+            self.left_panel.btn_read_cl500.setEnabled(True)
+            self.log_to_terminal("CL500 环境准备就绪...", "#98C379")
+
+    def _handle_worker_log(self, msg):
+        # 直接在当前类寻找 log_to_terminal
+        # 如果 log_to_terminal 就是定义在当前类里的，直接调
+        try:
+            self.log_to_terminal(f"[CL500] {msg}", "#E5C07B")
+
+            # 💡 核心技巧：防止 UI 积压
+            # 如果日志实在太多，每处理一条日志，让 UI 稍微喘口气
+            # import time
+            # if time.time() % 1 > 0.9: # 采样打印，或者强制处理事件
+            #     QApplication.processEvents()
+        except Exception as e:
+            print(f"Log Error: {e}")
 
     def eventFilter(self, watched, event):
         # 监控所有的键盘按下事件
@@ -467,6 +538,7 @@ class MainWindow(QMainWindow):
         self.left_panel = MultiSendPanel(self, width=320,serial_worker =self.serial_worker)
         self.middle_layout.addWidget(self.left_panel)
 
+
         # 中间终端：被左侧挤压
         self.terminal = TerminalView()
         self.terminal.send_data.connect(self.write_serial)
@@ -529,6 +601,8 @@ class MainWindow(QMainWindow):
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self._update_status_bar)
         self.status_timer.start(1000)
+
+        # self.left_panel._setup_cl500_for_sub_ui()  #直接调用左边面板的方法开启CL500线程
 
     def _update_status_bar(self):
         from datetime import datetime
@@ -861,8 +935,8 @@ class MainWindow(QMainWindow):
         """点击开始校准后的逻辑"""
         current_mode = self.combo_calib_mode.currentText()  # 获取当前选择的模式
         if current_mode == "CL500":
-            if not hasattr(self, 'cl500_worker'):
-                self._setup_cl500_workers()
+            if not self.cl500_worker.init_sdk():
+                return
         # 1. 获取当前选择的模式
         mode = self.combo_calib_mode.currentText()
         # 2. 获取并清洗点位数据
@@ -903,8 +977,8 @@ class MainWindow(QMainWindow):
         self.btn_start_calib.setText("开始校准")
         self.sync_calib_ui_state()
 
-        if hasattr(self, 'cl500_worker'):
-            self.cl500_worker.close_device()
+        # if hasattr(self, 'cl500_worker'):
+        #     self.cl500_worker.close_device()
         self.log_to_terminal("校准任务已结束", "#5DADE2")
 
     def get_serial_config(self):
@@ -1198,6 +1272,52 @@ class ScriptRunner(QThread):
             self.error.emit(str(e))
         finally:
             self.finished.emit()
+
+    def nativeEvent(self, eventType, message):
+        """監聽 Windows 底層訊息"""
+        msg = win32gui.PyGetMessages(message, 8192)
+        msg_id = msg[1]  # 訊息 ID
+
+        if msg_id == win32con.WM_DEVICECHANGE:
+            event = msg[2]  # wParam: 事件類型
+
+            # DBT_DEVICEARRIVAL: 設備插入
+            if event == 0x8000:
+                print("檢測到硬體插入，嘗試連接 CL500...")
+                # 延遲 1-2 秒執行，等待 Windows 驅動加載完成
+                QTimer.singleShot(2000, self._setup_cl500_workers)
+
+            # DBT_DEVICEREMOVECOMPLETE: 設備拔出
+            elif event == 0x8004:
+                print("檢測到硬體移除，執行清理...")
+                self._safe_close_cl500()
+
+        return super().nativeEvent(eventType, message)
+
+    def _safe_close_cl500(self):
+        """安全關閉設備並退出線程"""
+        if self.cl500_worker:
+            # 1. 斷開訊號連接，防止清理過程中的日誌再發回 UI
+            try:
+                self.sig_do_measure.disconnect()
+                self.cl500_worker.log_signal.disconnect()
+            except:
+                pass
+
+            # 2. 調用 Worker 內部的關閉邏輯
+            self.cl500_worker.close_device()
+
+        if self.cl500_thread and self.cl500_thread.isRunning():
+            # 3. 請求線程退出
+            self.cl500_thread.quit()
+            if not self.cl500_thread.wait(2000):  # 等待最多 2 秒
+                self.cl500_thread.terminate()  # 強行終止（最後手段）
+
+        # 4. 徹底重置對象，以便下次插入時重新創建
+        self.cl500_worker.close()
+        self.cl500_worker = None
+        self.cl500_thread = None
+        self.log_to_terminal("CL500 設備已拔出，線程已釋放", "#E06C75")
 
 if __name__ == "__main__":
     QApplication.setHighDpiScaleFactorRoundingPolicy(

@@ -95,93 +95,114 @@ class IlluminanceWorker(QObject):
 
     @Slot()
     def init_sdk(self):
-        """初始化 SDK 并进行零校准"""
+        """初始化 SDK 并进行零校准 (支持重用已打开的设备)"""
         try:
-            if hasattr(os, 'add_dll_directory'):
-                os.add_dll_directory(self.dll_folder)
-            os.chdir(self.dll_folder)
+            # --- 1. 基础环境加载 (仅在初次运行时执行) ---
+            if self.cl_api is None:
+                if hasattr(os, 'add_dll_directory'):
+                    os.add_dll_directory(self.dll_folder)
+                os.chdir(self.dll_folder)
+                dll_path = os.path.join(self.dll_folder, "libclapi.dll")
+                if not os.path.exists(dll_path):
+                    self.logger.error(f"找不到 DLL 文件: {dll_path}")
+                    self.finished_init.emit(False)
+                    return False
+                self.cl_api = ctypes.CDLL(dll_path)
 
-            dll_path = os.path.join(self.dll_folder, "libclapi.dll")
-            if not os.path.exists(dll_path):
-                self.logger.error(f"找不到 DLL 文件: {dll_path}")
-                self.finished_init.emit(False)
-                return
-
-            self.cl_api = ctypes.CDLL(dll_path)
-
-            # 1. 打开设备
-            if self.cl_api.CLOpenDevice(ctypes.byref(self.handle)) == SUCCESS:
-                self.cl_api.CLSetRemoteMode(self.handle, 1)
-
-                self.logger.info("CL500A设备连接成功，开始零校准 (约需 10-30 秒)...")
-                self.cl_api.CLDoCalibration(self.handle)
-
-                # 2. 轮询校准状态 (加入超时和退出响应)
-                c_status = ctypes.c_int(0)
-                start_cal = time.time()
-                while c_status.value != CL_CALIBMEAS_FINISH:
-                    if time.time() - start_cal > 40:
-                        raise TimeoutError("CL500A设备零校准响应超时")
-
-                    time.sleep(0.2)
-                    self.cl_api.CLPollingCalibration(self.handle, ctypes.byref(c_status))
-
-                self.is_initialized = True
-                self.finished_init.emit(True)
-                self.logger.info("CL500A照度计初始化及零校准完成。")
+            # --- 2. 设备连接逻辑 ---
+            # 如果 handle 为空或者为 0，说明设备还没打开
+            if not self.handle or self.handle.value == 0:
+                if self.cl_api.CLOpenDevice(ctypes.byref(self.handle)) == SUCCESS:
+                    self.cl_api.CLSetRemoteMode(self.handle, 1)
+                    self.logger.info("CL500A设备连接成功。")
+                else:
+                    self.logger.error("错误：未检测到CL500A设备，请检查 USB 连接。")
+                    self.finished_init.emit(False)
+                    return False
             else:
-                self.logger.error("错误：未检测到CL500A设备，请检查 USB 连接或驱动。")
-                self.finished_init.emit(False)
+                self.logger.info("设备已处于连接状态，准备开始重新校准...")
+
+            # --- 3. 执行零校准 (无论设备是刚开还是之前开的) ---
+            # 确保处于远程模式
+            self.cl_api.CLSetRemoteMode(self.handle, 1)
+
+            self.logger.info("开始零校准 (约需 10-30 秒)...")
+            self.cl_api.CLDoCalibration(self.handle)
+
+            # 轮询校准状态
+            c_status = ctypes.c_int(0)
+            start_cal = time.time()
+            timeout = 40  # 设定超时阈值
+
+            self.logger.info("零校准进行中，请勿遮挡传感器...")
+
+            while c_status.value != CL_CALIBMEAS_FINISH:
+                elapsed = time.time() - start_cal
+
+                # 每隔约 1 秒打印一次进度 (0.2s * 5)
+                # 或者直接每次循环都更新（如果你希望进度条更丝滑）
+                if elapsed > timeout:
+                    raise TimeoutError(f"CL500A设备零校准响应超时 (已耗时 {elapsed:.1f}s)")
+
+                # 打印当前进度
+                # \r 实现原地刷新（仅限控制台），logger 则会逐行记录
+                print(f"校准中... 已耗时: {elapsed:.1f}s / {timeout}s", end='\r')
+
+                # 如果你想在 UI 的 log_to_terminal 看到跳动，可以每隔 2 秒发一次
+                if int(elapsed * 5) % 10 == 0:  # 约每 2 秒进入一次
+                    self.logger.info(f"校准进度：已耗时 {elapsed:.1f} 秒...")
+
+                time.sleep(0.2)
+                self.cl_api.CLPollingCalibration(self.handle, ctypes.byref(c_status))
+
+            self.is_initialized = True
+            self.finished_init.emit(True)
+            self.logger.info("CL500A照度计零校准完成。")
+            return True
 
         except Exception as e:
-            self.logger.exception(f"CL500A初始化异常: {str(e)}")
+            self.logger.exception(f"CL500A初始化/校准异常: {str(e)}")
             self.finished_init.emit(False)
+            return False
 
     @Slot()
     def init_sdk_not_calib(self):
-        """初始化 SDK 并进行零校准"""
+        """仅初始化 SDK (如果设备已打开则直接返回成功)"""
         try:
-            if hasattr(os, 'add_dll_directory'):
-                os.add_dll_directory(self.dll_folder)
-            os.chdir(self.dll_folder)
+            # 如果已经初始化过且句柄有效，直接报成功
+            if self.is_initialized and self.handle and self.handle.value != 0:
+                self.logger.info("设备已连接，无需重复初始化。")
+                self.finished_init.emit(True)
+                return True
 
-            dll_path = os.path.join(self.dll_folder, "libclapi.dll")
-            if not os.path.exists(dll_path):
-                self.logger.error(f"找不到 DLL 文件: {dll_path}")
-                self.finished_init.emit(False)
-                return
+            if self.cl_api is None:
+                if hasattr(os, 'add_dll_directory'):
+                    os.add_dll_directory(self.dll_folder)
+                os.chdir(self.dll_folder)
+                dll_path = os.path.join(self.dll_folder, "libclapi.dll")
+                self.cl_api = ctypes.CDLL(dll_path)
 
-            self.cl_api = ctypes.CDLL(dll_path)
-
-
-            # 1. 打开设备
             if self.cl_api.CLOpenDevice(ctypes.byref(self.handle)) == SUCCESS:
                 self.cl_api.CLSetRemoteMode(self.handle, 1)
-
-                # 尝试设置色温模式 (0:JIS, 1:ANSI)，增强稳定性
-                try:
-                    self.cl_api.CLSetTcpMode(self.handle, 0)
-                except:
-                    pass
-
-                self.logger.info("CL500A设备连接成功...")
                 self.is_initialized = True
+                self.logger.info("CL500A设备连接成功...")
                 self.finished_init.emit(True)
+                return True
             else:
-                self.logger.error("错误：未检测到CL500A设备，请检查 USB 连接或驱动。")
+                self.logger.error("错误：未检测到CL500A设备。")
                 self.finished_init.emit(False)
+                return False
 
         except Exception as e:
-            self.logger.exception(f"CL500A初始化异常: {str(e)}")
+            self.logger.exception(f"CL500A连接异常: {str(e)}")
             self.finished_init.emit(False)
+            return False
 
 
 
 
     @Slot(int)
     def start_measure_task(self, n):
-        import threading
-        print(f"DEBUG: 测量任务正在线程 {threading.current_thread().name} (ID: {threading.get_native_id()}) 中运行")
         """执行 n 次测量并计算平均值"""
         if not self.is_initialized:
             self.logger.warning("CL500A设备未就绪，请先执行初始化。")
@@ -217,21 +238,27 @@ class IlluminanceWorker(QObject):
                     time.sleep(0.1)
 
                 if success:
-                    print("准备GetData")
+                    # print("准备GetData")
                     data = CL_MEASDATA()
-                    print("结构体大小:", ctypes.sizeof(data))
-                    self.cl_api.CLGetMeasData(self.handle, CL_COLORSPACE_EVTCPDUV, ctypes.byref(data))
+                    # print("结构体大小:", ctypes.sizeof(self._measure_data_buffer))
+                    ret_get = self.cl_api.CLGetMeasData(self.handle, CL_COLORSPACE_EVTCPDUV,
+                                                        ctypes.byref(data))
 
-                    lux = data.Evxy.Ev  # 或者 data.EvTduv.Ev，它们是同一个值
-                    tcp = data.EvTduv.Tcp  # 现在 Tcp 对应正确的偏移量 4 字节
+                    if ret_get == SUCCESS:
+                        # 3. 提取值
+                        lux = data.Evxy.Ev
+                        tcp = data.EvTduv.Tcp
 
-                    # 数据合法性基本过滤
-                    if lux < INVALID_VAL and tcp < INVALID_VAL:
-                        measurements.append((lux, tcp))
-                        self.logger.info(f"[{i + 1}/{n}] 成功: {lux:.2f} Lux | {tcp:.0f} K")
-                        self.result_signal.emit(lux, tcp)
+                        # 数据合法性基本过滤
+                        # CL500A 的测量上限通常不会超过 1,00,000 Lux，色温不会超过 100,000K
+                        if 0 <= lux < 100000 and 0 <= tcp < 100000:
+                            measurements.append((lux, tcp))
+                            self.logger.info(f"[{i + 1}/{n}] 成功: {lux:.2f} Lux | {tcp:.0f} K")
+                            self.result_signal.emit(lux, tcp)
+                        else:
+                            self.logger.warning(f"[{i + 1}/{n}] 警告: 读数超出CL500A设备量程。")
                     else:
-                        self.logger.warning(f"[{i + 1}/{n}] 警告: 读数超出CL500A设备量程。")
+                        self.logger.error(f"CLGetMeasData 失败，代码: {ret_get}")
                 else:
                     self.logger.error(f"[{i + 1}/{n}] 错误: 测量响应超时。")
             else:
