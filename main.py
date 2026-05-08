@@ -16,6 +16,8 @@ from sub_ui import AnimatedPanel,MultiSendPanel
 from PySide6.QtCore import Qt
 import win32con # 需要安裝 pywin32: pip install pywin32
 import win32gui
+import ctypes
+import ctypes.wintypes as wintypes
 
 # --- 样式常量 ---
 STYLE_DARK = """
@@ -231,7 +233,9 @@ class MainWindow(QMainWindow):
 
         self._setup_cl500_workers()
         # self._waiting_for_echo = False
-        self.cl500_worker.measure_done_signal.connect(self._cl500_read_btn)
+
+        self._cl500_is_connecting = False  # 初始化锁定标志
+        self.register_device_notification()
 
     def _cl500_read_btn(self):
         self.left_panel.btn_read_cl500.setEnabled(True)
@@ -275,6 +279,7 @@ class MainWindow(QMainWindow):
         self.cl500_worker.finished_init.connect(self._on_cl500_init_result)
         # self.cl500_worker.log_signal.connect(lambda msg: self.log_to_terminal(f"[CL500] {msg}", "#E5C07B"))
         self.cl500_worker.log_signal.connect(self._handle_worker_log, Qt.QueuedConnection)
+        self.cl500_worker.measure_done_signal.connect(self._cl500_read_btn)
 
         self.sig_do_init_cl500_not_calib.connect(self.cl500_worker.init_sdk_not_calib)
         self.sig_do_init_cl500_calib.connect(self.cl500_worker.init_sdk)
@@ -1293,6 +1298,110 @@ class MainWindow(QMainWindow):
 
         self.sync_ui_state()
 
+    def register_device_notification(self):
+        # GUID_DEVINTERFACE_USB_DEVICE: {A5DCBF10-6530-11D2-901F-00C04FB16623}
+        # 使用你查到的 CL-500A 专用类 GUID
+        CL500_CLASS_GUID = "{36fc9e60-c465-11cf-8056-444553540000}"
+
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", wintypes.DWORD),
+                ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD),
+                ("Data4", ctypes.c_ubyte * 8)  # 修改这里：c_byte -> c_ubyte
+            ]
+
+        class DEV_BROADCAST_DEVICEINTERFACE(ctypes.Structure):
+            _fields_ = [
+                ("dbcc_size", wintypes.DWORD),
+                ("dbcc_devicetype", wintypes.DWORD),
+                ("dbcc_reserved", wintypes.DWORD),
+                ("dbcc_classguid", GUID),
+                ("dbcc_name", ctypes.c_wchar * 260)
+            ]
+
+        import uuid
+        uu = uuid.UUID(CL500_CLASS_GUID)
+        target_guid = GUID(uu.time_low, uu.time_mid, uu.time_hi_version, (ctypes.c_ubyte * 8)(*uu.bytes[8:]))
+
+        notification_filter = DEV_BROADCAST_DEVICEINTERFACE()
+        notification_filter.dbcc_size = ctypes.sizeof(DEV_BROADCAST_DEVICEINTERFACE)
+        notification_filter.dbcc_devicetype = 0x00000005  # DBT_DEVTYP_DEVICEINTERFACE
+        notification_filter.dbcc_classguid = target_guid
+
+        # 重点：为了万无一失，添加 DEVICE_NOTIFY_ALL_INTERFACE_CLASSES 标志位
+        # 这样即使 GUID 有微小偏差，系统也会推送所有接口变更
+        res = ctypes.windll.user32.RegisterDeviceNotificationW(
+            int(self.winId()),
+            ctypes.byref(notification_filter),
+            0x00000004  # DEVICE_NOTIFY_ALL_INTERFACE_CLASSES
+        )
+
+        if res:
+            print(f"[SYS] 已针对类 {CL500_CLASS_GUID} 开启全量设备监听")
+
+    def nativeEvent(self, eventType, message):
+        if eventType == b'windows_generic_MSG':
+            msg = wintypes.MSG.from_address(int(message))
+            if msg.message == 0x0219:  # WM_DEVICECHANGE
+                wParam = msg.wParam
+                # 调试：打印所有收到的 wParam，看看插拔时跳出什么数字
+                # print(f"Device Event: {hex(wParam)}")
+
+                if wParam == 0x8000:  # 插入
+                    if self.cl500_worker is None and not self._cl500_is_connecting:
+                        self._cl500_is_connecting = True  # 立即锁定，挡住后续 0x8000
+                        self.log_to_terminal("检测到 CL500A 插入，准备初始化...", "#98C379")
+                        QTimer.singleShot(2000, self._setup_cl500_workers)
+                elif wParam == 0x8004:  # 拔出
+                    if self.cl500_worker is not None:
+                        # 拔出时彻底重置状态
+                        self._cl500_is_connecting = False
+                        self.left_panel.btn_read_cl500.setEnabled(False)
+                        self.log_to_terminal("CL500A 已从系统移除", "#E06C75")
+                        self._safe_close_cl500()
+
+        return super().nativeEvent(eventType, message)
+
+    def _safe_close_cl500(self):
+        """安全关闭设备并退出线程（增加防御性检查）"""
+        # 1. 检查 worker 是否存在，避免多次进入导致的重复清理
+        if self.cl500_worker is None:
+            return
+
+        self.log_to_terminal("正在清理 CL500 资源...", "#E06C75")
+
+        # 2. 安全断开信号 (使用 try-except 忽略未连接的告警)
+        try:
+            # 断开主窗口发往 worker 的测量信号
+            self.sig_do_measure.disconnect()
+            # 断开 worker 回传给 UI 的日志信号
+            self.cl500_worker.log_signal.disconnect()
+        except (RuntimeError, TypeError):
+            # 如果信号本身没连接，静默跳过
+            pass
+
+        # 3. 调用 Worker 内部的硬件关闭逻辑
+        # 注意：这里确认是调用 close_device 而不是 close
+        try:
+            self.cl500_worker.close_device()
+        except Exception as e:
+            print(f"关闭硬件句柄时出错: {e}")
+
+        # 4. 停止线程
+        if self.cl500_thread and self.cl500_thread.isRunning():
+            self.cl500_thread.quit()
+            if not self.cl500_thread.wait(1000):  # 给 1 秒退出时间
+                self.cl500_thread.terminate()
+
+        # 5. 【关键】最后彻底销毁对象并置空
+        # IlluminanceWorker 继承自 QObject，不需要手动调用 .close()
+        # 只要从 Python 层面删除引用，垃圾回收和 Qt 父子系统会处理它
+        self.cl500_worker = None
+        self.cl500_thread = None
+
+        self.log_to_terminal("CL500 资源已完全释放", "#E5C07B")
+
 class ScriptRunner(QThread):
     error = Signal(str)
     finished = Signal()
@@ -1314,51 +1423,7 @@ class ScriptRunner(QThread):
         finally:
             self.finished.emit()
 
-    def nativeEvent(self, eventType, message):
-        """監聽 Windows 底層訊息"""
-        msg = win32gui.PyGetMessages(message, 8192)
-        msg_id = msg[1]  # 訊息 ID
 
-        if msg_id == win32con.WM_DEVICECHANGE:
-            event = msg[2]  # wParam: 事件類型
-
-            # DBT_DEVICEARRIVAL: 設備插入
-            if event == 0x8000:
-                print("檢測到硬體插入，嘗試連接 CL500...")
-                # 延遲 1-2 秒執行，等待 Windows 驅動加載完成
-                QTimer.singleShot(2000, self._setup_cl500_workers)
-
-            # DBT_DEVICEREMOVECOMPLETE: 設備拔出
-            elif event == 0x8004:
-                print("檢測到硬體移除，執行清理...")
-                self._safe_close_cl500()
-
-        return super().nativeEvent(eventType, message)
-
-    def _safe_close_cl500(self):
-        """安全關閉設備並退出線程"""
-        if self.cl500_worker:
-            # 1. 斷開訊號連接，防止清理過程中的日誌再發回 UI
-            try:
-                self.sig_do_measure.disconnect()
-                self.cl500_worker.log_signal.disconnect()
-            except:
-                pass
-
-            # 2. 調用 Worker 內部的關閉邏輯
-            self.cl500_worker.close_device()
-
-        if self.cl500_thread and self.cl500_thread.isRunning():
-            # 3. 請求線程退出
-            self.cl500_thread.quit()
-            if not self.cl500_thread.wait(2000):  # 等待最多 2 秒
-                self.cl500_thread.terminate()  # 強行終止（最後手段）
-
-        # 4. 徹底重置對象，以便下次插入時重新創建
-        self.cl500_worker.close()
-        self.cl500_worker = None
-        self.cl500_thread = None
-        self.log_to_terminal("CL500 設備已拔出，線程已釋放", "#E06C75")
 
 if __name__ == "__main__":
     QApplication.setHighDpiScaleFactorRoundingPolicy(

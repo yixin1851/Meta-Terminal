@@ -139,6 +139,7 @@ class MultiSendPanel(AnimatedPanel):
         self.times_edit.setFixedWidth(35)
         # 2. 限制高度，使其与按钮对齐
         self.times_edit.setFixedHeight(25)
+        self.times_edit.returnPressed.connect(self.on_read_cl500_clicked)
         # 3. 设置深色样式，使其融入背景
         self.times_edit.setStyleSheet("""
             QLineEdit {
@@ -330,6 +331,7 @@ class MultiSendPanel(AnimatedPanel):
         # 修正：将信号绑定放在 row_obj 创建之后，确保能正确引用自身
         btn_send.clicked.connect(lambda: self.send_cmd(row_obj))
         chk_hex.stateChanged.connect(lambda state: self._handle_hex_toggle(state, edit_ctx))
+        edit_ctx.returnPressed.connect(lambda: self.send_cmd(row_obj))
 
         self.rows.append(row_obj)
         self.list_layout.addWidget(row_widget)

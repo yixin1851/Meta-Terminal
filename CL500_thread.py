@@ -313,13 +313,28 @@ class IlluminanceWorker(QObject):
                     time.sleep(0.1)
 
                 if success:
+                    # print("准备GetData")
                     data = CL_MEASDATA()
-                    self.cl_api.CLGetMeasData(self.handle, CL_COLORSPACE_EVTCPDUV, ctypes.byref(data))
+                    # print("结构体大小:", ctypes.sizeof(self._measure_data_buffer))
+                    ret_get = self.cl_api.CLGetMeasData(self.handle, CL_COLORSPACE_EVTCPDUV,
+                                                        ctypes.byref(data))
 
-                    lux, tcp = data.Evxy.Ev, data.EvTduv.Tcp
+                    if ret_get == SUCCESS:
+                        # 3. 提取值
+                        lux = data.Evxy.Ev
+                        tcp = data.EvTduv.Tcp
 
-                return lux, tcp
-
+                        # 数据合法性基本过滤
+                        # CL500A 的测量上限通常不会超过 1,00,000 Lux，色温不会超过 100,000K
+                        if 0 <= lux < 100000 and 0 <= tcp < 100000:
+                            self.result_signal.emit(lux, tcp)
+                            return lux, tcp
+                        else:
+                            self.logger.warning("警告: 读数超出CL500A设备量程。")
+                    else:
+                        self.logger.error(f"CLGetMeasData 失败，代码: {ret_get}")
+                else:
+                    self.logger.error("错误: 测量响应超时。")
         except Exception as e:
             print(f"SDK内部测量错误: {e}")
             return None, None
