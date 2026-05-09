@@ -843,7 +843,7 @@ class MainWindow(QMainWindow):
             self.send_cmd("set_lux 0")
 
             # 超时处理
-            QTimer.singleShot(3000, self.check_handshake_timeout)
+            QTimer.singleShot(2000, self.check_handshake_timeout)
         else:
             # --- 阶段 B：完全关闭状态 ---
             self._waiting_for_echo = False
@@ -1426,6 +1426,9 @@ class ScriptRunner(QThread):
 
 
 if __name__ == "__main__":
+    # 在程序启动第一行就锁死工作目录为 .exe 所在目录
+    os.chdir(os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__)))
+
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )

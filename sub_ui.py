@@ -76,7 +76,7 @@ class MultiSendPanel(AnimatedPanel):
         self.serial_worker = serial_worker
 
         # 在 __init__ 中添加 定时器触发保存cmd_config.json
-        self.save_timer = QTimer()
+        self.save_timer = QTimer(self)  # 必须挂载在 self 上，并传入 self 作为 parent
         self.save_timer.setSingleShot(True)  # 只触发一次
         self.save_timer.timeout.connect(self._execute_save)  # 真正的写入逻辑
 
@@ -330,7 +330,7 @@ class MultiSendPanel(AnimatedPanel):
 
         # 修正：将信号绑定放在 row_obj 创建之后，确保能正确引用自身
         btn_send.clicked.connect(lambda: self.send_cmd(row_obj))
-        chk_hex.stateChanged.connect(lambda state: self._handle_hex_toggle(state, edit_ctx))
+        # chk_hex.stateChanged.connect(lambda state: self._handle_hex_toggle(state, edit_ctx))
         edit_ctx.returnPressed.connect(lambda: self.send_cmd(row_obj))
 
         self.rows.append(row_obj)
@@ -346,51 +346,59 @@ class MultiSendPanel(AnimatedPanel):
         row_obj["hex"].stateChanged.connect(self.save_settings)
 
         def on_hex_toggled(state):
-            """
-            state: 2 代表 Checked (Qt.CheckState.Checked), 0 代表 Unchecked
-            """
-            # 1. 获取当前文本并去空格
-            current_text = edit_ctx.text().strip()
-            if not current_text:
+            edit_field = edit_ctx
+            content = edit_field.text().strip()
+            if not content:
                 return
 
-            # 2. 暂时屏蔽信号，防止 setText 触发 textChanged 导致重复保存
-            edit_ctx.blockSignals(True)
+            # 2. 状态判定 (2=Checked, 0=Unchecked)
+            is_to_hex = (state == 2 or state == Qt.CheckState.Checked)
+
+            # 【关键】暂时阻塞信号，防止 setText 触发其他关联逻辑导致二次转换
+            edit_field.blockSignals(True)
 
             try:
-                if state == 2:  # 切换到 HEX 模式
-                    # 逻辑：字符串 -> 十六进制字符串 (e.g., "help" -> "68 65 6C 70")
-                    # 使用 upper() 保持 Meta Term 的专业感
-                    hex_content = current_text.encode('utf-8').hex(' ').upper()
-                    edit_ctx.setText(hex_content)
+                if is_to_hex:
+                    # 1. 屏蔽信号，防止 setText 触发其他逻辑
+                    edit_field.blockSignals(True)
+                    # --- 逻辑：Checked 后，不管是什么，都强转 HEX ---
+                    # 为了防止你遇到的 36 43 (HEX 的 HEX)，我们要先确认它是不是已经转过了
+                    # 如果已经是类似 "6C 73" 的格式且内容全是非 ASCII 字符，我们再转
+                    # 但按你要求的“不管是什么内容”，我们直接转：
+                    bytes_data = content.encode('utf-8')
+                    hex_str = ' '.join([f'{b:02X}' for b in bytes_data])
+                    import time
+                    print(f"[{time.time()}] 准备写入: {hex_str}")
+                    edit_field.setText(hex_str)
+                    import time
+                    print(f"[{time.time()}] 准备写入: {hex_str}")
 
-                else:  # 切换回 文本 模式
-                    # 逻辑：十六进制字符串 -> 字符串 (e.g., "68 65 6C 70" -> "help")
-                    # 移除所有空格
-                    clean_hex = "".join(current_text.split())
 
-                    # 检查长度是否为偶数，若不是则补0（简单容错）
-                    if len(clean_hex) % 2 != 0:
-                        clean_hex = '0' + clean_hex
+                else:
+                    # --- 逻辑：Unchecked 后，检测是否为有效 HEX ---
+                    # 1. 移除空格
+                    clean_hex = content.replace(' ', '')
 
-                    raw_bytes = bytes.fromhex(clean_hex)
+                    # 2. 验证：长度必须是偶数，且字符必须在 0-F 范围内
+                    is_valid_hex = (len(clean_hex) % 2 == 0) and all(c in "0123456789ABCDEFabcdef" for c in clean_hex)
 
-                    try:
-                        # 尝试解码回文本
-                        decoded_text = raw_bytes.decode('utf-8')
-                        edit_ctx.setText(decoded_text)
-                    except UnicodeDecodeError:
-                        # 关键：如果包含 0xAA/0xFF 等不可见字符，解码会失败
-                        # 此时我们不做转换，保持 HEX 原样，并在状态栏提示（可选）
-                        print("Meta Term: 包含非文本字节，保持 HEX 格式。")
-                        # 强制把勾选框勾回去，防止 UI 状态与内容不符
-                        chk_hex.blockSignals(True)
-                        chk_hex.setChecked(True)
-                        chk_hex.blockSignals(False)
+                    if is_valid_hex:
+                        try:
+                            bytes_data = bytes.fromhex(clean_hex)
+                            # 转成字符显示
+                            decoded_text = bytes_data.decode('utf-8', errors='replace')
+                            edit_field.setText(decoded_text)
+                        except Exception:
+                            pass  # 如果解析失败，保持 HEX 原样
+                    else:
+                        # 不是有效 HEX，保持原样（比如它已经是 "ls" 了）
+                        pass
 
             except Exception as e:
-                print(f"转换异常: {e}")
-
+                print(f">>> 转换异常: {e}")
+            finally:
+                # 恢复信号
+                edit_field.blockSignals(False)
             # 3. 恢复信号并更新 ToolTip
             edit_ctx.blockSignals(False)
             update_tooltip()
@@ -413,65 +421,190 @@ class MultiSendPanel(AnimatedPanel):
                 print(f"Sending: {data}")  # 调试输出
 
     # --- 功能 2: HEX 显示转换 ---
-    def _handle_hex_toggle(self, state, edit_field):
-        content = edit_field.text().strip()
-        if not content: return
-        try:
-            if state == Qt.Checked:  # 转为 HEX 格式
-                hex_str = ' '.join([f'{ord(c):02X}' for c in content])
-                edit_field.setText(hex_str)
-            else:  # 从 HEX 转回字符串
-                bytes_obj = bytes.fromhex(content.replace(' ', ''))
-                edit_field.setText(bytes_obj.decode('ascii', errors='replace'))
-        except Exception:
-            pass  # 转换失败不强求
+    # def _handle_hex_toggle(self, state, edit_field):
+    #     # 1. 预处理
+    #     content = edit_field.text().strip()
+    #     if not content:
+    #         return
+    #
+    #     # 2. 状态判定 (2=Checked, 0=Unchecked)
+    #     is_to_hex = (state == 2 or state == Qt.CheckState.Checked)
+    #
+    #     # 【关键】暂时阻塞信号，防止 setText 触发其他关联逻辑导致二次转换
+    #     edit_field.blockSignals(True)
+    #
+    #     try:
+    #         if is_to_hex:
+    #             # 1. 屏蔽信号，防止 setText 触发其他逻辑
+    #             edit_field.blockSignals(True)
+    #             # --- 逻辑：Checked 后，不管是什么，都强转 HEX ---
+    #             # 为了防止你遇到的 36 43 (HEX 的 HEX)，我们要先确认它是不是已经转过了
+    #             # 如果已经是类似 "6C 73" 的格式且内容全是非 ASCII 字符，我们再转
+    #             # 但按你要求的“不管是什么内容”，我们直接转：
+    #             bytes_data = content.encode('utf-8')
+    #             hex_str = ' '.join([f'{b:02X}' for b in bytes_data])
+    #             import time
+    #             print(f"[{time.time()}] 准备写入: {hex_str}")
+    #             edit_field.setText(hex_str)
+    #             import time
+    #             print(f"[{time.time()}] 准备写入: {hex_str}")
+    #
+    #
+    #         else:
+    #             # --- 逻辑：Unchecked 后，检测是否为有效 HEX ---
+    #             # 1. 移除空格
+    #             clean_hex = content.replace(' ', '')
+    #
+    #             # 2. 验证：长度必须是偶数，且字符必须在 0-F 范围内
+    #             is_valid_hex = (len(clean_hex) % 2 == 0) and all(c in "0123456789ABCDEFabcdef" for c in clean_hex)
+    #
+    #             if is_valid_hex:
+    #                 try:
+    #                     bytes_data = bytes.fromhex(clean_hex)
+    #                     # 转成字符显示
+    #                     decoded_text = bytes_data.decode('utf-8', errors='replace')
+    #                     edit_field.setText(decoded_text)
+    #                 except Exception:
+    #                     pass  # 如果解析失败，保持 HEX 原样
+    #             else:
+    #                 # 不是有效 HEX，保持原样（比如它已经是 "ls" 了）
+    #                 pass
+    #
+    #     except Exception as e:
+    #         print(f">>> 转换异常: {e}")
+    #     finally:
+    #         # 恢复信号
+    #         edit_field.blockSignals(False)
 
     # --- 功能 4: Loop Send 逻辑 ---
+        # --- 功能 4: Loop Send 逻辑 ---
     def _toggle_loop(self, state):
-        if state == Qt.Checked:
-            # 排序：根据 Order 字段从小到大执行
+        # 兼容 PySide6 枚举和整数判断 (2 为 Checked)
+        if state == 2 or state == Qt.CheckState.Checked:
+            valid_list = []
+
+            for r in self.rows:
+                order_text = r["order"].text().strip()
+                cmd_text = r["ctx"].text().strip()
+
+                # 逻辑判断：
+                # 1. Order 文本框必须有数字
+                # 2. 命令文本框必须有文本
+                if order_text.isdigit() and cmd_text:
+                    valid_list.append(r)
+
+            # 3. 按照 Order 数字从小到大排序
             self.sorted_rows = sorted(
-                [r for r in self.rows if r["ctx"].text().strip()],
-                key=lambda x: int(x["order"].text() if x["order"].text().isdigit() else 999)
+                valid_list,
+                key=lambda x: int(x["order"].text())
             )
+
             if self.sorted_rows:
+                print(f">>> 循环启动：找到 {len(self.sorted_rows)} 条有效指令")
+                # 打印一下排序结果，方便调试
+                orders = [r["order"].text() for r in self.sorted_rows]
+                print(f">>> 发送顺序: {' -> '.join(orders)}")
+                self.main_window.log_to_terminal(f">>> 发送顺序: {' -> '.join(orders)}")
+
                 self.current_loop_index = 0
                 self._handle_loop_send()
+            else:
+                print(">>> 未找到符合条件的指令（需同时填写 Order 数字和命令）")
+                self.check_loop.setChecked(False)
         else:
-            self.loop_timer.stop()
+            print(">>> 循环发送停止")
+            self.main_window.log_to_terminal(">>> 循环发送停止")
+            # 定时器会在下次递归检查 isChecked() 时自然停止
 
     def _handle_loop_send(self):
+        """核心循环逻辑：先等待，再发送"""
         if not self.check_loop.isChecked() or not self.sorted_rows:
             return
 
+        # 1. 获取当前准备发送的行
         row = self.sorted_rows[self.current_loop_index]
-        # 执行发送信号
-        self._send_single_row_by_obj(row)
 
-        # 获取当前行的延时，并设置下一次定时器
-        delay = int(row["ms"].text() if row["ms"].text().isdigit() else 100)
-        self.loop_timer.start(delay)
+        # 2. 获取该行设定的延迟时间
+        try:
+            ms_val = row["ms"].text().strip()
+            delay = int(ms_val) if ms_val.isdigit() else 100
+            delay = max(1, delay)
+        except:
+            delay = 100
 
-        # 索引递增
+        # 3. 【核心改动】使用 singleShot 将发送动作推迟执行
+        # 这里的 lambda 表达式确保在 delay 毫秒后，先执行发送，再准备下一次递归
+        QTimer.singleShot(delay, lambda: self._process_step(row))
+
+    def _process_step(self, row):
+        """真正的发送动作及递归入口"""
+        if not self.check_loop.isChecked():
+            return
+
+        # 获取当前行的数据用于打印显示
+        order = row["order"].text().strip()
+        ctx = row["ctx"].text().strip()
+        is_hex = "HEX" if row["hex"].isChecked() else "TXT"
+        ms = row["ms"].text().strip() or "100"
+
+        # 2. 构造日志消息
+        # 格式：[Order 1] Loop Send: AT+VER (TXT) delay 500ms
+        log_msg = f"Loop Send [Order {order}]: {ctx} ({is_hex}) - wait {ms}ms"
+
+        # 3. 发送到 UI 终端（默认蓝色）
+        # 这里假设 MultiSendPanel 能够访问到主界面的 log_to_terminal 方法
+        # 如果这个方法就在类里，用 self.log_to_terminal
+        # 如果在主窗口里，可能需要通过 self.main_window.log_to_terminal 或者信号传递
+        # try:
+        #     self.main_window.log_to_terminal(log_msg)
+        # except Exception as e:
+        #     print(f">>> UI日志写入失败: {e}")  # 后备方案：写回黑框
+
+        # --- 在黑框中显示发送详情 ---
+        # 使用颜色或特殊符号让它在调试信息中更显眼
+        print(f"进程执行 -> [Order {order}] 发送内容: {ctx} ({is_hex}) | 预设延时: {ms}ms")
+
+        # 1. 执行发送
+        self.send_cmd(row)
+
+        # 2. 计算下一个索引
         self.current_loop_index = (self.current_loop_index + 1) % len(self.sorted_rows)
 
-    def _send_single_row_by_obj(self, row):
-        data = {"content": row["ctx"].text(), "is_hex": row["hex"].isChecked()}
-        self.data_ready_to_send.emit(data)
+        # 3. 递归调用，进入下一轮的“等待期”
+        self._handle_loop_send()
+
+    # _send_single_row_by_obj 可以删掉，直接复用 send_cmd 即可
 
     def save_settings(self):
         """
         所有的控件更新都会触发这个函数，
         但它只是重置定时器，不会立即写硬盘。
         """
-        self.save_timer.start(1000)  # 1000ms 后执行 _execute_save
+        # print(">>> 触发了保存信号！")  # 验证信号链是否通畅
+        self.save_timer.start(500)  # 500ms 后执行 _execute_save
+
+    # @staticmethod
+    def get_resource_path(self):
+        """获取程序运行时的根目录路径"""
+        if getattr(sys, 'frozen', False):
+            # 如果是打包后的环境 (.exe)，返回 .exe 所在的文件夹
+            return os.path.dirname(sys.executable)
+        else:
+            # 如果是开发环境 (python main.py)，返回当前脚本所在的文件夹
+            return os.path.dirname(os.path.abspath(__file__))
 
     def _execute_save(self):
         """
         真正的 JSON 写入逻辑
         """
-        config_dir = "config"
+        # 1. 使用兼容性函数获取路径
+        root_path = self.get_resource_path()
+        config_dir = os.path.join(root_path, "config")
         file_path = os.path.join(config_dir, "cmd_config.json")
+
+        # 2. 确保文件夹存在（在 .exe 同级目录下创建 config 文件夹）
+        if not os.path.exists(config_dir):
+            os.makedirs(config_dir)
 
         if not os.path.exists(config_dir):
             os.makedirs(config_dir)
@@ -490,7 +623,7 @@ class MultiSendPanel(AnimatedPanel):
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(config_data, f, indent=4, ensure_ascii=False)
             # 调试用，稳定后可以删掉这行 print
-            # print("Meta Term: 配置已自动同步。")
+            print("Meta Term: 配置已自动同步。")
         except Exception as e:
             print(f"自动保存失败: {e}")
 
