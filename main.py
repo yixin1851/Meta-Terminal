@@ -266,7 +266,7 @@ class MainWindow(QMainWindow):
 
             # 检查 Worker 内部的路径检查是否通过
             if not temp_worker.is_valid:
-                self.main_window.log_to_terminal("CL500 初始化失败：DLL 路径无效", "#E06C75")
+                self.log_to_terminal("CL500 初始化失败：DLL 路径无效", "#E06C75")
                 return
 
             self.cl500_worker = temp_worker

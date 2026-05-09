@@ -68,6 +68,8 @@ class IlluminanceWorker(QObject):
         self.cl_api = None
         self.is_initialized = False
         self._is_running = False
+        # 如果通过了初步检查
+        self.is_valid = False
 
         # 在初始化时，把信号连到自己的函数上
         # self.sig_do_init.connect(self.init_sdk_not_calib)
