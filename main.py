@@ -216,7 +216,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.key_buffer = ""
-        self.secret_key = "YOD001"
+        self.secret_key = "JZ888"
         self.cl500_worker = None
         # 关键：给整个窗口安装监视器
         self.installEventFilter(self)
@@ -456,7 +456,7 @@ class MainWindow(QMainWindow):
         self.btn_left_toggle.setObjectName("IconButton")
         self.btn_left_toggle.clicked.connect(lambda: self.left_panel.toggle())
 
-        title_label = QLabel("Meta Terminal")
+        title_label = QLabel("ALP Debug")
         title_label.setStyleSheet("font-weight: bold; color: #007ACC;")
 
         self.btn_script = QPushButton("Python 脚本")
@@ -486,7 +486,7 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(self.btn_left_toggle)
         top_layout.addWidget(title_label)
         top_layout.addStretch()
-        top_layout.addWidget(self.btn_script)
+        # top_layout.addWidget(self.btn_script)
         top_layout.addWidget(self.btn_right_toggle)
 
         top_layout.addWidget(self.btn_min)
@@ -750,13 +750,15 @@ class MainWindow(QMainWindow):
         self.combo_calib_mode = QComboBox()
         # 这里填入你在 MODE_CONFIG 中定义的 Key
         self.combo_calib_mode.addItems(["Lux", "PD", "CL500", "DN", "Other"])
-        layout.addWidget(QLabel("选择校准维度:"))
+        self.selec_label = QLabel("选择校准维度:")
+        layout.addWidget(self.selec_label)
         layout.addWidget(self.combo_calib_mode)
 
         # 3. 点位输入 LineEdit (使用你自定义的 CalibrationLineEdit)
         self.edit_calib_points = CalibrationLineEdit()
         self.edit_calib_points.setPlaceholderText("例如: 10, 50, 100")
-        layout.addWidget(QLabel("校准点位 (逗号分隔):"))
+        self.duohao_label = QLabel("校准点位 (逗号分隔):")
+        layout.addWidget(self.duohao_label)
         layout.addWidget(self.edit_calib_points)
 
         # 4. 开始按钮
@@ -783,6 +785,13 @@ class MainWindow(QMainWindow):
         hidden_layout = QVBoxLayout(self.hidden_calib_widget)
         hidden_layout.setContentsMargins(0, 0, 0, 0)
 
+        hidden_layout.addWidget(self.cb_calibration)
+        hidden_layout.addWidget(self.combo_calib_mode)
+        hidden_layout.addWidget(self.edit_calib_points)
+        hidden_layout.addWidget(self.btn_start_calib)
+        hidden_layout.addWidget(self.selec_label)
+        hidden_layout.addWidget(self.duohao_label)
+
         # 分隔线
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
@@ -804,8 +813,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.hidden_calib_widget)
 
         # 初始状态
-        # self.hidden_calib_widget.setVisible(True)
-        self.set_hidden_calib_enabled(False)  # 初始禁用
+        self.hidden_calib_widget.setVisible(False)
+        # self.set_hidden_calib_enabled(False)  # 初始禁用
 
         # 绑定按钮事件（你可以根据需要实现对应的逻辑）
         self.btn_internal_calib.clicked.connect(lambda: self.log_to_terminal("执行光源内校准...", "#E06C75"))
@@ -817,6 +826,7 @@ class MainWindow(QMainWindow):
         """控制隐藏校准区域是否可用（灰/亮）"""
         for widget in self.hidden_calib_widget.findChildren(QWidget):
             widget.setEnabled(enabled)
+            self.hidden_calib_widget.setVisible(True)
 
         # 可选：视觉效果更明显
         if enabled:
