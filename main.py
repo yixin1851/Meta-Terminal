@@ -246,6 +246,7 @@ class MainWindow(QMainWindow):
 
 
 
+
     def _cl500_read_btn(self):
         self.left_panel.btn_read_cl500.setEnabled(True)
         self.left_panel.btn_read_cl500.setText("读取CL500")
@@ -417,6 +418,15 @@ class MainWindow(QMainWindow):
     def setup_ui(self):
         # 1. 中央容器
         self.container = QWidget()
+        #如下设置圆角
+        self.container.setObjectName("MainContainer")
+        self.container.setStyleSheet("""
+        #MainContainer {
+            background-color: #1e1e1e;
+            border-radius: 10px;
+        }
+        """)
+
         self.setCentralWidget(self.container)
         self.main_layout = QVBoxLayout(self.container)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
@@ -619,7 +629,17 @@ class MainWindow(QMainWindow):
         self.status_timer.timeout.connect(self._update_status_bar)
         self.status_timer.start(1000)
 
+        self.top_menu.mouseDoubleClickEvent = self.on_titlebar_double_click
+
         # self.left_panel._setup_cl500_for_sub_ui()  #直接调用左边面板的方法开启CL500线程
+
+    def on_titlebar_double_click(self, event):
+        child = self.top_menu.childAt(event.position().toPoint())
+        if isinstance(child, QPushButton):
+            return
+
+        if event.button() == Qt.LeftButton:
+            self.toggle_max_restore()
 
     def _update_status_bar(self):
         from datetime import datetime
@@ -1057,21 +1077,18 @@ class MainWindow(QMainWindow):
             "stopbits": stopbits_map[self.combo_stopbits.currentText()]
         }
 
-
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            # 记录按下瞬间的全局位置与窗口左上角的偏移量
-            self.drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
-            # self.drag_pos = event.globalPosition().toPoint()
+            if self.top_menu.geometry().contains(event.position().toPoint()):
+                self.drag_pos = event.globalPosition().toPoint()
+            else:
+                self.drag_pos = None
 
     def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.LeftButton:
-            # 检查是否存在 drag_pos 属性，且当前是左键按住移动
-            if hasattr(self, 'drag_pos') and event.buttons() & Qt.MouseButton.LeftButton:
-                # 使用 globalPosition() 确保平滑拖动
-                self.move(event.globalPosition().toPoint() - self.drag_pos)
-                event.accept()
+        if event.buttons() & Qt.LeftButton and self.drag_pos:
+            delta = event.globalPosition().toPoint() - self.drag_pos
+            self.move(self.pos() + delta)
+            self.drag_pos = event.globalPosition().toPoint()
 
     def mouseReleaseEvent(self, event):
         self.drag_pos = None
@@ -1369,7 +1386,7 @@ class MainWindow(QMainWindow):
                 if wParam == 0x8000:  # 插入
                     if self.cl500_worker is None and not self._cl500_is_connecting:
                         self._cl500_is_connecting = True  # 立即锁定，挡住后续 0x8000
-                        self.log_to_terminal("检测到 CL500A 插入，准备初始化...", "#98C379")
+                        self.log_to_terminal("检测到设备插入，准备初始化...", "#98C379")
                         QTimer.singleShot(2000, self._setup_cl500_workers)
                 elif wParam == 0x8004:  # 拔出
                     if self.cl500_worker is not None:
