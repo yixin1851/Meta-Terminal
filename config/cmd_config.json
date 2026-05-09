@@ -3,7 +3,7 @@
         "order": "1",
         "hex": false,
         "ctx": "reboot",
-        "ms": "2000"
+        "ms": "200"
     },
     {
         "order": "",
@@ -30,10 +30,10 @@
         "ms": "200"
     },
     {
-        "order": "",
+        "order": "5",
         "hex": false,
         "ctx": "get_mcuid",
-        "ms": "1000"
+        "ms": "100"
     },
     {
         "order": "",

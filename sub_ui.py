@@ -555,10 +555,10 @@ class MultiSendPanel(AnimatedPanel):
         # 这里假设 MultiSendPanel 能够访问到主界面的 log_to_terminal 方法
         # 如果这个方法就在类里，用 self.log_to_terminal
         # 如果在主窗口里，可能需要通过 self.main_window.log_to_terminal 或者信号传递
-        # try:
-        #     self.main_window.log_to_terminal(log_msg)
-        # except Exception as e:
-        #     print(f">>> UI日志写入失败: {e}")  # 后备方案：写回黑框
+        try:
+            self.main_window.log_to_terminal(log_msg)
+        except Exception as e:
+            print(f">>> UI日志写入失败: {e}")  # 后备方案：写回黑框
 
         # --- 在黑框中显示发送详情 ---
         # 使用颜色或特殊符号让它在调试信息中更显眼

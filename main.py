@@ -64,7 +64,8 @@ class TerminalView(QPlainTextEdit):
     def __init__(self):
         super().__init__()
         self.setPlaceholderText("终端按键输入不完美，慎用！")
-        self.setLineWrapMode(QPlainTextEdit.NoWrap)
+        # 将原来的 self.setLineWrapMode(QPlainTextEdit.NoWrap) 改为：
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
 
         # 1. 字体与外观（使用等宽字体是基础）
         font = QFont("Consolas", 10.5)
@@ -74,6 +75,10 @@ class TerminalView(QPlainTextEdit):
         # 2. 初始紧凑格式设置
         self.document().setDocumentMargin(0)
         self._apply_compact_format()
+
+        self.setMaximumBlockCount(1000)  # 只保留最近 1000 行
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        # self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         # 3. 强力 ANSI 过滤正则：匹配所有 ESC [ 开头的序列
         # self.ansi_escape = re.compile(
