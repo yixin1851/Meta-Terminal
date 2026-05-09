@@ -1008,8 +1008,14 @@ class MainWindow(QMainWindow):
         self.btn_start_calib.setText("校准中...")
 
         if current_mode == "CL500":
-            # 发射信号触发子线程中的初始化
-            self.sig_do_init_cl500_calib.emit()
+            if self.cl500_worker == None or self.cl500_thread == None:
+                # 只有在没有运行中的线程时，才发射初始化信号
+                self.log_to_terminal("CL500设备不正常，请检查设备...", "#E5C07B")
+                self.btn_start_calib.setEnabled(True)
+                self.btn_start_calib.setText("开始校准")
+            else:
+                self.log_to_terminal("正在启动 CL500 初始化流程...", "#61AFEF")
+                self.sig_do_init_cl500_calib.emit()
             return
         else:
             # 如果是其他模式（如普通读取模式），直接进入第二阶段

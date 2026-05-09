@@ -1,15 +1,15 @@
 [
     {
-        "order": "1",
+        "order": "",
         "hex": false,
         "ctx": "reboot",
         "ms": "200"
     },
     {
-        "order": "",
+        "order": "1",
         "hex": false,
-        "ctx": "",
-        "ms": "200"
+        "ctx": "set_lux 1000",
+        "ms": "2000"
     },
     {
         "order": "3",
@@ -21,19 +21,19 @@
         "order": "4",
         "hex": false,
         "ctx": "set_lux 0",
-        "ms": "200"
-    },
-    {
-        "order": "4",
-        "hex": false,
-        "ctx": "12",
-        "ms": "200"
+        "ms": "1000"
     },
     {
         "order": "5",
         "hex": false,
-        "ctx": "get_mcuid",
-        "ms": "100"
+        "ctx": "set_lux 1000",
+        "ms": "2000"
+    },
+    {
+        "order": "5",
+        "hex": false,
+        "ctx": "",
+        "ms": "1000"
     },
     {
         "order": "",
