@@ -1,1 +1,1 @@
-{"port": "COM5 - Prolific PL2303GT USB Serial COM Port (COM5)", "baud": "19200", "databits": "8", "parity": "None", "stopbits": "1", "local_echo": false}
+{"port": "COM2 - ELTIMA Virtual Serial Port (COM2->COM1)", "baud": "19200", "databits": "8", "parity": "None", "stopbits": "1", "local_echo": false}

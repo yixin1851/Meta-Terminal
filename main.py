@@ -224,11 +224,13 @@ class MainWindow(QMainWindow):
         self.setWindowFlags(Qt.FramelessWindowHint)
         # self.setWindowTitle("YOD")
         self.resize(1100, 750)
-        self.config_file = "config/com_config.json"
+
         self._last_ports = [] #  关键：缓存上一次端口
 
-
         self.setup_ui()
+        root_path = self.left_panel.get_resource_path()
+        config_dir = os.path.join(root_path, "config")
+        self.config_file = os.path.join(config_dir, "com_config.json") # "config/com_config.json"
         self.load_config()
         self.setStyleSheet(STYLE_DARK)
 
@@ -241,6 +243,8 @@ class MainWindow(QMainWindow):
 
         self._cl500_is_connecting = False  # 初始化锁定标志
         self.register_device_notification()
+
+
 
     def _cl500_read_btn(self):
         self.left_panel.btn_read_cl500.setEnabled(True)
@@ -1056,13 +1060,22 @@ class MainWindow(QMainWindow):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self.drag_pos = event.globalPosition().toPoint()
+            # 记录按下瞬间的全局位置与窗口左上角的偏移量
+            self.drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+            # self.drag_pos = event.globalPosition().toPoint()
 
     def mouseMoveEvent(self, event):
         if event.buttons() == Qt.LeftButton:
-            delta = event.globalPosition().toPoint() - self.drag_pos
-            self.move(self.x() + delta.x(), self.y() + delta.y())
-            self.drag_pos = event.globalPosition().toPoint()
+            # 检查是否存在 drag_pos 属性，且当前是左键按住移动
+            if hasattr(self, 'drag_pos') and event.buttons() & Qt.MouseButton.LeftButton:
+                # 使用 globalPosition() 确保平滑拖动
+                self.move(event.globalPosition().toPoint() - self.drag_pos)
+                event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self.drag_pos = None
+        event.accept()
 
     def set_ui_locked(self, locked: bool):
         self.combo_port.setEnabled(not locked)
