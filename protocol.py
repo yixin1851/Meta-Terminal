@@ -5,13 +5,11 @@ class LineProtocol:
     def __init__(self, max_buffer_size=65536):
         self.buffer = bytearray()
         self.max_buffer_size = max_buffer_size
+        self._ui_pending_cr = False
 
         # ✔ ANSI 正确匹配
         # self.ansi_escape = re.compile(rb'\x1b\[[0-9;?]*[a-zA-Z]')
         self.ansi_escape = re.compile(rb'\x1b\[[0-9;?]*[ -/]*[@-~]')
-
-        # ✔ 只保留换行（tab也不显示，但可以选择是否保留）
-        self.keep = {0x0D, 0x0A}
 
     def _handle_backspace_sequence(self, data: bytes) -> bytes:
         i = 0
@@ -49,13 +47,26 @@ class LineProtocol:
         data = self._handle_backspace_sequence(data)  # ⭐关键  处理设备因删除键而返回的空格键
         data = self.ansi_escape.sub(b'', data)
 
-        out = bytearray()
+        chars = []
 
         for b in data:
-            if b in (0x0D, 0x0A) or 32 <= b <= 126:
-                out.append(b)
+            if b == 0x0D:
+                chars.append("\n")
+                self._ui_pending_cr = True
+                continue
 
-        return out.decode("utf-8", errors="ignore")
+            if b == 0x0A:
+                if self._ui_pending_cr:
+                    self._ui_pending_cr = False
+                    continue
+                chars.append("\n")
+                continue
+
+            self._ui_pending_cr = False
+            if 32 <= b <= 126:
+                chars.append(chr(b))
+
+        return "".join(chars)
 
     # =========================
     # 2. 仅用于“业务数据解析”（不丢任何原始信息）

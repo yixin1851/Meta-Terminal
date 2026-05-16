@@ -53,6 +53,7 @@ class IlluminanceWorker(QObject):
     # 数据信号
     result_signal = Signal(float, float)  # 单次 Lux, Tcp
     avg_result_signal = Signal(float, float)  # 平均 Lux, Tcp
+    sync_measure_done = Signal(object)  # 校准线程同步等待的单次测量结果
     # 状态信号
     log_signal = Signal(str)  # 统一的日志信号
     finished_init = Signal(bool) # 未校准初始化
@@ -66,6 +67,7 @@ class IlluminanceWorker(QObject):
         self.dll_folder = dll_folder
         self.handle = ctypes.c_void_p(0)
         self.cl_api = None
+        self._dll_dir_cookie = None
         self.is_initialized = False
         self._is_running = False
         # 如果通过了初步检查
@@ -96,21 +98,30 @@ class IlluminanceWorker(QObject):
         # 如果通过了初步检查
         self.is_valid = True
 
+    def _ensure_sdk_loaded(self):
+        """加载 CL500A SDK，避免切换全局工作目录影响主程序路径。"""
+        if self.cl_api is not None:
+            return True
+
+        dll_path = os.path.join(self.dll_folder, "libclapi.dll")
+        if not os.path.exists(dll_path):
+            self.logger.error(f"找不到 DLL 文件: {dll_path}")
+            return False
+
+        if hasattr(os, 'add_dll_directory') and self._dll_dir_cookie is None:
+            self._dll_dir_cookie = os.add_dll_directory(self.dll_folder)
+
+        self.cl_api = ctypes.CDLL(dll_path)
+        return True
+
     @Slot()
     def init_sdk(self):
         """初始化 SDK 并进行零校准 (支持重用已打开的设备)"""
         try:
             # --- 1. 基础环境加载 (仅在初次运行时执行) ---
-            if self.cl_api is None:
-                if hasattr(os, 'add_dll_directory'):
-                    os.add_dll_directory(self.dll_folder)
-                os.chdir(self.dll_folder)
-                dll_path = os.path.join(self.dll_folder, "libclapi.dll")
-                if not os.path.exists(dll_path):
-                    self.logger.error(f"找不到 DLL 文件: {dll_path}")
-                    self.finished_init_cl500_calib.emit(False)
-
-                self.cl_api = ctypes.CDLL(dll_path)
+            if not self._ensure_sdk_loaded():
+                self.finished_init_cl500_calib.emit(False)
+                return False
 
             # --- 2. 设备连接逻辑 ---
             # 如果 handle 为空或者为 0，说明设备还没打开
@@ -121,6 +132,7 @@ class IlluminanceWorker(QObject):
                 else:
                     self.logger.error("错误：未检测到CL500A设备，请检查 USB 连接。")
                     self.finished_init_cl500_calib.emit(False)
+                    return False
 
             else:
                 self.logger.info("设备已处于连接状态，准备开始重新校准...")
@@ -161,11 +173,13 @@ class IlluminanceWorker(QObject):
             self.is_initialized = True
             self.finished_init_cl500_calib.emit(True)
             self.logger.info("CL500A照度计零校准完成。")
+            return True
 
 
         except Exception as e:
             self.logger.exception(f"CL500A初始化/校准异常: {str(e)}")
             self.finished_init_cl500_calib.emit(False)
+            return False
 
 
     @Slot()
@@ -178,12 +192,9 @@ class IlluminanceWorker(QObject):
                 self.finished_init.emit(True)
                 return True
 
-            if self.cl_api is None:
-                if hasattr(os, 'add_dll_directory'):
-                    os.add_dll_directory(self.dll_folder)
-                os.chdir(self.dll_folder)
-                dll_path = os.path.join(self.dll_folder, "libclapi.dll")
-                self.cl_api = ctypes.CDLL(dll_path)
+            if not self._ensure_sdk_loaded():
+                self.finished_init.emit(False)
+                return False
 
             if self.cl_api.CLOpenDevice(ctypes.byref(self.handle)) == SUCCESS:
                 self.cl_api.CLSetRemoteMode(self.handle, 1)
@@ -202,6 +213,12 @@ class IlluminanceWorker(QObject):
             return False
 
 
+
+
+    @Slot()
+    def measure_once_for_calibration(self):
+        """在 CL500 工作线程中执行单次同步测量，并把结果发回等待方。"""
+        self.sync_measure_done.emit(self.sync_measure())
 
 
     @Slot(int)
@@ -287,14 +304,18 @@ class IlluminanceWorker(QObject):
         提供给校准线程调用的同步测量方法。
         直接返回 (lux, tcp)，如果失败返回 (None, None)
         """
+        started_here = False
         try:
-            if not self.handle:
+            if not self.is_initialized or not self.handle or self.handle.value == 0 or self.cl_api is None:
+                self.logger.warning("CL500A设备未就绪，请先执行初始化。")
                 return None, None
 
-            if not self._is_running:
-                self.logger.info("检测到停止信号，CL500A测量任务提前结束。")
+            if self._is_running:
+                self.logger.warning("CL500A正在执行其他测量任务，请稍后重试。")
                 return None, None
 
+            self._is_running = True
+            started_here = True
             exposure = ctypes.c_int32(0)
             ret = self.cl_api.CLDoMeasurement(self.handle, ctypes.byref(exposure))
 
@@ -305,7 +326,7 @@ class IlluminanceWorker(QObject):
                 while self._is_running:
                     # 检查是否超过了 60 秒
                     if (time.time() - start_p) > 60:
-                        self.logger.error("错误: CL500A测量响应超时 (已等待 {60}s)。")
+                        self.logger.error(f"错误: CL500A测量响应超时 (已等待 {60}s)。")
                         break
                     status = ctypes.c_int(0)
                     self.cl_api.CLPollingMeasure(self.handle, ctypes.byref(status))
@@ -337,9 +358,16 @@ class IlluminanceWorker(QObject):
                         self.logger.error(f"CLGetMeasData 失败，代码: {ret_get}")
                 else:
                     self.logger.error("错误: 测量响应超时。")
+            else:
+                self.logger.error(f"错误: 触发指令失败 (Code: {ret})。")
         except Exception as e:
             print(f"SDK内部测量错误: {e}")
             return None, None
+        finally:
+            if started_here:
+                self._is_running = False
+
+        return None, None
 
     def stop_task(self):
         """用于从外部强制中断测量循环"""

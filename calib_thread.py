@@ -1,7 +1,8 @@
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, Signal, QMetaObject, Qt
 import time
 import re
 import json
+import threading
 
 # 模式配置映射表
 MODE_CONFIG = {
@@ -191,17 +192,39 @@ class CalibrationThread(QThread):
             return None
 
         try:
-            # 由于我们已经在校准线程（子线程）中，
-            # 如果 SDK Worker 也在它自己的线程，我们这里需要同步获取结果。
-            # 简单做法是直接调用 worker 的测量方法（如果该方法是线程安全的）
-            # 或者通过信号槽等待。为了逻辑简单，这里演示直接调用：
-
             self.log_signal.emit("正在通过 SDK 读取 CL500A 数据...")
 
-            # 注意：此处应确保 worker.start_measure() 不会弹出 UI，
-            # 并且能直接返回或通过变量更新结果。
-            # 建议在 IlluminanceWorker 中增加一个同步测量方法：
-            lux, tcp = worker.sync_measure()
+            done_event = threading.Event()
+            result_holder = {"value": (None, None)}
+
+            def on_measure_done(result):
+                result_holder["value"] = result or (None, None)
+                done_event.set()
+
+            worker.sync_measure_done.connect(on_measure_done, Qt.DirectConnection)
+            try:
+                queued = QMetaObject.invokeMethod(
+                    worker,
+                    "measure_once_for_calibration",
+                    Qt.QueuedConnection
+                )
+                if queued is False:
+                    self.log_signal.emit("错误：CL500 测量请求未能投递到工作线程")
+                    return None
+
+                if not done_event.wait(70):
+                    self.log_signal.emit("错误：CL500 SDK 读取超时")
+                    return None
+            finally:
+                try:
+                    worker.sync_measure_done.disconnect(on_measure_done)
+                except (RuntimeError, TypeError):
+                    pass
+
+            lux, tcp = result_holder["value"]
+            if lux is None:
+                self.log_signal.emit("错误：CL500 SDK 未返回有效照度")
+                return None
             return lux
         except Exception as e:
             self.log_signal.emit(f"CL500 SDK 读取异常: {e}")
@@ -397,6 +420,7 @@ class CalibrationThread(QThread):
             raw_text = self.wait_for_file_content(timeout=10)
             self._is_collecting_file = False
             any_changed = False
+            had_issue = False
 
             if not raw_text:
                 self.log_signal.emit(">>> [ERROR] 未能读取到配置文件内容")
@@ -411,11 +435,13 @@ class CalibrationThread(QThread):
             cfg = MODE_CONFIG.get(self.mode)
             if not cfg:
                 self.log_signal.emit(f">>> [ERROR] 未定义模式: {self.mode}")
+                self.finished_signal.emit(f"失败：未定义模式 {self.mode}")
                 return
 
             # 4. 执行校准逻辑
             if not self.values:
                 self.log_signal.emit(">>> [WARN] UI 未传入任何待校准点位")
+                self.finished_signal.emit("失败：未传入任何待校准点位")
                 return
 
             for val in self.values:
@@ -428,6 +454,7 @@ class CalibrationThread(QThread):
 
                 if not item:
                     self.log_signal.emit(f">>> [SKIP] 点位 {val} 不在配置文件中，跳过")
+                    had_issue = True
                     continue
 
                 # 执行算法
@@ -452,11 +479,12 @@ class CalibrationThread(QThread):
                         self.log_signal.emit(f"📝 点位 {val} 校准成功，更新字段: {cfg['val_field']}, {cfg['k_factor']}")
                 else:
                     # 这里的 a_val_result 在失败时是错误描述
+                    had_issue = True
                     self.log_signal.emit(f"❌ 点位 {val} 校准失败: {a_val_result}")
 
             # --- 第五阶段：统一写入本地文件 ---
             # 修正逻辑：只有当 any_changed 为 True 时才写入文件
-            if not any_changed:
+            if any_changed:
                 import os
                 import json
                 from datetime import datetime
@@ -511,7 +539,10 @@ class CalibrationThread(QThread):
                 except Exception as e:
                     self.log_signal.emit(f"⚠️ [错误] 流程执行失败: {str(e)}")
             else:
-                self.log_signal.emit("ℹ️ [信息] 所有点位均在范围内，配置文件未做改动")
+                if had_issue:
+                    self.log_signal.emit("ℹ️ [信息] 未产生可写入的新配置，请查看上方失败或跳过的点位")
+                else:
+                    self.log_signal.emit("ℹ️ [信息] 所有点位均在范围内，配置文件未做改动")
 
             self.finished_signal.emit("所有校准任务处理完毕")
 
