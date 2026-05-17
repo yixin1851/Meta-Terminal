@@ -415,6 +415,18 @@ class MainWindow(QMainWindow):
         if compacted:
             self.terminal.insertPlainText("".join(compacted))
 
+    def is_serial_open(self):
+        return bool(getattr(self, "serial_worker", None) and self.serial_worker.is_open())
+
+    def ensure_serial_open(self):
+        """所有需要串口的 UI 操作统一走这里，避免静默失败。"""
+        if self.is_serial_open():
+            return True
+
+        QMessageBox.warning(self, "串口未打开", "请先打开串口")
+        self.log_to_terminal("串口未打开，请先打开串口", "#E06C75")
+        return False
+
     def start_port_monitor(self):
         self.port_timer = QTimer(self)
         self.port_timer.timeout.connect(self.check_ports)
@@ -536,8 +548,8 @@ class MainWindow(QMainWindow):
         self.input_line = QLineEdit()
         self.input_line.setPlaceholderText("输入命令...")
         self.btn_send = QPushButton("发送")
-        self.input_line.returnPressed.connect(self.write_serial)
-        self.btn_send.clicked.connect(self.write_serial)
+        self.input_line.returnPressed.connect(lambda: self.write_serial())
+        self.btn_send.clicked.connect(lambda: self.write_serial())
 
 
         self.cb_hex = QCheckBox("Hex发送")
@@ -876,19 +888,29 @@ class MainWindow(QMainWindow):
         :param cmd_str: 命令字符串，如 "set_lux 100.0"
         """
         if not cmd_str:
-            return
+            return False
+
+        if not self.ensure_serial_open():
+            return False
 
         # 拼接换行符并转为字节流
         full_cmd = f"{cmd_str}\r\n".encode('utf-8')
 
         # 调用 serial_worker 发送
-        if self.serial_worker and self.serial_worker.running:
-            self.serial_worker.send_async(full_cmd)
+        self.serial_worker.send_async(full_cmd)
+        return True
 
     def cb_calibration_check(self):
         master_on = self.cb_calibration.isChecked()
 
         if master_on:
+            if not self.ensure_serial_open():
+                self.cb_calibration.blockSignals(True)
+                self.cb_calibration.setChecked(False)
+                self.cb_calibration.blockSignals(False)
+                self.sync_calib_ui_state()
+                return
+
             # --- 阶段 A：发起握手，UI 必须变灰并锁定 ---
             self.log_to_terminal("正在检测设备连接...", "#D19A66")
 
@@ -1081,6 +1103,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "错误", "请输入校准点位！")
             return
 
+        if not self.ensure_serial_open():
+            return
+
         """点击开始校准后的逻辑"""
         current_mode = self.combo_calib_mode.currentText()  # 获取当前选择的模式
 
@@ -1125,6 +1150,9 @@ class MainWindow(QMainWindow):
     def _start_logic_calibration_process(self):
         # 1. 获取当前选择的模式
         mode = self.combo_calib_mode.currentText()
+        if not self.ensure_serial_open():
+            self.restore_calibration_controls()
+            return
         # 2. 获取并清洗点位数据
         raw_text = self.edit_calib_points.text().strip(',')
         if not raw_text:
@@ -1269,6 +1297,9 @@ class MainWindow(QMainWindow):
         self.save_config()
 
     def write_serial(self, data=None):
+        if not self.ensure_serial_open():
+            return
+
         # data 为 None 或 bool 通常意味着点击了“发送”按钮
         if data is None or isinstance(data, bool):
             text = self.input_line.text()
@@ -1291,15 +1322,14 @@ class MainWindow(QMainWindow):
             send_bytes = data
 
         # 1. 执行发送
-        if self.serial_worker.running:
-            # success = self.serial_worker.send(send_bytes)
-            # 使用我们新写的异步发送方法
-            self.serial_worker.send_async(send_bytes)
+        # success = self.serial_worker.send(send_bytes)
+        # 使用我们新写的异步发送方法
+        self.serial_worker.send_async(send_bytes)
 
-            # 2. 如果发送成功且开启了本地回显，则将其显示在终端
-            if self.cb_local_echo.isChecked():
-                # 为了区分是“发的”还是“收的”，可以加个颜色，或者直接调用显示函数
-                self.on_data_received(send_bytes, is_send=True)
+        # 2. 如果发送成功且开启了本地回显，则将其显示在终端
+        if self.cb_local_echo.isChecked():
+            # 为了区分是“发的”还是“收的”，可以加个颜色，或者直接调用显示函数
+            self.on_data_received(send_bytes, is_send=True)
 
     def on_data_received(self, data, is_send=False):
         mode = "hex" if self.cb_hex.isChecked() else "text"
@@ -1371,13 +1401,15 @@ class MainWindow(QMainWindow):
 
     def write_to_serial(self, data: bytes):
         """全局统一发送接口"""
-        if self.serial_worker and self.serial_worker.is_open():
-            # 这里直接调用 worker 的封装
-            self.serial_worker.send(data)
+        if not self.ensure_serial_open():
+            return
 
-            # 处理本地回显逻辑
-            if self.cb_local_echo.isChecked():
-                self.on_data_received(data, is_send=True)
+        # 这里直接调用 worker 的封装
+        self.serial_worker.send(data)
+
+        # 处理本地回显逻辑
+        if self.cb_local_echo.isChecked():
+            self.on_data_received(data, is_send=True)
 
     def on_serial_error(self, msg):
         # # 只提示一次 + 状态同步

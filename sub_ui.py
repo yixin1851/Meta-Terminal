@@ -649,11 +649,14 @@ class MultiSendPanel(AnimatedPanel):
                 # 直接转成字节流，并加上换行符（嵌入式 Shell 必需）
                 data_to_send = f"{raw_text}\r\n".encode('utf-8')
 
+            if hasattr(self.main_window, "ensure_serial_open") and not self.main_window.ensure_serial_open():
+                return
+
             # 执行物理发送
             if self.serial_worker and self.serial_worker.running:
                 self.serial_worker.send_async(data_to_send)
             else:
-                print("串口未连接")
+                QMessageBox.warning(self, "串口未打开", "请先打开串口")
 
         except ValueError as e:
             # 专门捕获 HEX 格式错误并给出友好提示
