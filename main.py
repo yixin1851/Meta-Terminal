@@ -240,6 +240,8 @@ class MainWindow(QMainWindow):
         self.protocol = LineProtocol()  # 实例化协议处理器
         self._allow_next_prompt_repeat = False
         self._terminal_user_input_len = 0
+        self._serial_prompt_fragment = ""
+        self._pending_terminal_logs = []
 
         self._setup_cl500_workers()
         # self._waiting_for_echo = False
@@ -369,6 +371,13 @@ class MainWindow(QMainWindow):
         if not hasattr(self, 'terminal'):
             return
 
+        if self._should_defer_system_log():
+            self._pending_terminal_logs.append((msg, color))
+            return
+
+        self._insert_system_log(msg, color)
+
+    def _insert_system_log(self, msg, color="#569CD6"):
         cursor = self.terminal.textCursor()
         cursor.movePosition(QTextCursor.End)
 
@@ -392,9 +401,66 @@ class MainWindow(QMainWindow):
         self.terminal.ensureCursorVisible()
 
     _SHELL_PROMPT_ONLY_RE = re.compile(r"^\s*msh\s*/>\s*$")
+    _SHELL_PROMPT_TEXT = "msh />"
 
     def _is_shell_prompt_only(self, text):
         return bool(self._SHELL_PROMPT_ONLY_RE.match(text or ""))
+
+    def _current_terminal_line_text(self):
+        cursor = self.terminal.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        return cursor.block().text()
+
+    def _should_defer_system_log(self):
+        if getattr(self, "_serial_prompt_fragment", ""):
+            return True
+
+        current_line = self._current_terminal_line_text()
+        if not current_line.strip():
+            return False
+
+        return not self._is_shell_prompt_only(current_line)
+
+    def _flush_pending_terminal_logs(self):
+        if self._should_defer_system_log():
+            return
+
+        pending_logs = getattr(self, "_pending_terminal_logs", [])
+        if not pending_logs:
+            return
+
+        self._pending_terminal_logs = []
+        for msg, color in pending_logs:
+            self._insert_system_log(msg, color)
+
+    def _merge_serial_prompt_fragment(self, content):
+        """暂存被串口拆包的 msh 提示符前缀，避免系统日志插入到中间。"""
+        if not content:
+            return ""
+
+        if self._serial_prompt_fragment:
+            content = self._serial_prompt_fragment + content
+            self._serial_prompt_fragment = ""
+
+        max_size = min(len(self._SHELL_PROMPT_TEXT) - 1, len(content))
+        for size in range(max_size, 0, -1):
+            suffix = content[-size:]
+            if not self._SHELL_PROMPT_TEXT.startswith(suffix):
+                continue
+
+            prefix = content[:-size]
+            if prefix.endswith("\n"):
+                self._serial_prompt_fragment = suffix
+                return prefix
+
+            if not prefix:
+                cursor = self.terminal.textCursor()
+                cursor.movePosition(QTextCursor.End)
+                if cursor.columnNumber() == 0 and cursor.block().text() == "":
+                    self._serial_prompt_fragment = suffix
+                    return ""
+
+        return content
 
     def _collapse_trailing_duplicate_prompts(self):
         """只折叠连续重复的 msh 提示符，保留手动回车产生的正常提示符。"""
@@ -450,10 +516,20 @@ class MainWindow(QMainWindow):
         if compacted:
             self.terminal.insertPlainText("".join(compacted))
 
-    def insert_serial_stream(self, content):
+    def insert_serial_stream(self, content, is_send=False):
         """插入串口实时流，仅折叠连续重复的 shell 提示符。"""
+        if is_send:
+            if self._serial_prompt_fragment:
+                self._insert_serial_text(self._serial_prompt_fragment)
+                self._serial_prompt_fragment = ""
+            self._flush_pending_terminal_logs()
+            self._insert_serial_text(content)
+            return
+
+        content = self._merge_serial_prompt_fragment(content)
         self._insert_serial_text(content)
         self._collapse_trailing_duplicate_prompts()
+        self._flush_pending_terminal_logs()
 
     def _prepare_prompt_display_for_send(self, send_bytes, from_terminal=False):
         if not from_terminal:
@@ -1415,7 +1491,7 @@ class MainWindow(QMainWindow):
                     # 现在的 packet["render"] 可能是单个字符，也可能是带换行的字符串
                     content = packet.get("render", "")
                     # 无论是否在匹配，收到的数据都应该实时打到终端上
-                    self.insert_serial_stream(content)
+                    self.insert_serial_stream(content, is_send=is_send)
                     # --- 逻辑 A：回显匹配（静默进行） ---
                     if getattr(self, '_waiting_for_echo', False):
                         if not hasattr(self, '_echo_tmp_buffer'):

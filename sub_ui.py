@@ -268,7 +268,7 @@ class MultiSendPanel(AnimatedPanel):
 
         # Order (功能 4)
         edit_order = QLineEdit(str(order_val))
-        edit_order.setFixedWidth(35)
+        edit_order.setFixedWidth(30)
         edit_order.setAlignment(Qt.AlignCenter)
 
         # HEX Checkbox (功能 2)
