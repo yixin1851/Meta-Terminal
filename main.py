@@ -238,7 +238,8 @@ class MainWindow(QMainWindow):
         self.start_port_monitor()  #  启动监听
 
         self.protocol = LineProtocol()  # 实例化协议处理器
-        self._serial_display_buffer = ""
+        self._allow_next_prompt_repeat = False
+        self._terminal_user_input_len = 0
 
         self._setup_cl500_workers()
         # self._waiting_for_echo = False
@@ -392,6 +393,37 @@ class MainWindow(QMainWindow):
 
     _SHELL_PROMPT_ONLY_RE = re.compile(r"^\s*msh\s*/>\s*$")
 
+    def _is_shell_prompt_only(self, text):
+        return bool(self._SHELL_PROMPT_ONLY_RE.match(text or ""))
+
+    def _collapse_trailing_duplicate_prompts(self):
+        """只折叠连续重复的 msh 提示符，保留手动回车产生的正常提示符。"""
+        doc = self.terminal.document()
+        last = doc.lastBlock()
+        if not last.isValid():
+            return
+
+        prompt_block = last.previous() if last.text() == "" else last
+        if not prompt_block.isValid() or not self._is_shell_prompt_only(prompt_block.text()):
+            return
+
+        previous = prompt_block.previous()
+        if not previous.isValid() or not self._is_shell_prompt_only(previous.text()):
+            if self._allow_next_prompt_repeat:
+                self._allow_next_prompt_repeat = False
+            return
+
+        if self._allow_next_prompt_repeat:
+            self._allow_next_prompt_repeat = False
+            return
+
+        cursor = QTextCursor(doc)
+        cursor.setPosition(previous.position())
+        cursor.setPosition(prompt_block.position(), QTextCursor.KeepAnchor)
+        cursor.removeSelectedText()
+        cursor.movePosition(QTextCursor.End)
+        self.terminal.setTextCursor(cursor)
+
     def _insert_serial_text(self, content):
         """插入串口文本；当前行为空时吞掉重复换行，避免显示多余空行。"""
         if not content:
@@ -419,21 +451,29 @@ class MainWindow(QMainWindow):
             self.terminal.insertPlainText("".join(compacted))
 
     def insert_serial_stream(self, content):
-        """插入串口实时流，折叠设备返回的独立 shell 提示符行。"""
-        if not content:
+        """插入串口实时流，仅折叠连续重复的 shell 提示符。"""
+        self._insert_serial_text(content)
+        self._collapse_trailing_duplicate_prompts()
+
+    def _prepare_prompt_display_for_send(self, send_bytes, from_terminal=False):
+        if not from_terminal:
+            self._allow_next_prompt_repeat = False
+            self._terminal_user_input_len = 0
             return
 
-        self._serial_display_buffer += content
+        if send_bytes in (b"\r", b"\n", b"\r\n"):
+            self._allow_next_prompt_repeat = self._terminal_user_input_len == 0
+            self._terminal_user_input_len = 0
+            return
 
-        while "\n" in self._serial_display_buffer:
-            line, self._serial_display_buffer = self._serial_display_buffer.split("\n", 1)
-            if self._SHELL_PROMPT_ONLY_RE.match(line):
-                continue
-            self._insert_serial_text(line + "\n")
+        self._allow_next_prompt_repeat = False
+        if send_bytes == b"\x08":
+            self._terminal_user_input_len = max(0, self._terminal_user_input_len - 1)
+            return
+        if send_bytes.startswith(b"\x1b"):
+            return
 
-        if len(self._serial_display_buffer) > 1024:
-            self._insert_serial_text(self._serial_display_buffer)
-            self._serial_display_buffer = ""
+        self._terminal_user_input_len += sum(1 for b in send_bytes if b >= 32)
 
     def is_serial_open(self):
         return bool(getattr(self, "serial_worker", None) and self.serial_worker.is_open())
@@ -1344,6 +1384,7 @@ class MainWindow(QMainWindow):
         # 1. 执行发送
         # success = self.serial_worker.send(send_bytes)
         # 使用我们新写的异步发送方法
+        self._prepare_prompt_display_for_send(send_bytes, from_terminal=data is not None)
         self.serial_worker.send_async(send_bytes)
 
         # 2. 如果发送成功且开启了本地回显，则将其显示在终端
