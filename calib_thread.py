@@ -225,6 +225,9 @@ class CalibrationThread(QThread):
             if lux is None:
                 self.log_signal.emit("错误：CL500 SDK 未返回有效照度")
                 return None
+
+            tcp_text = f"{tcp:.0f} K" if tcp is not None else "--"
+            self.log_signal.emit(f"CL500 SDK 读取值: Lux={lux:.2f}, Tcp={tcp_text}")
             return lux
         except Exception as e:
             self.log_signal.emit(f"CL500 SDK 读取异常: {e}")
@@ -299,11 +302,19 @@ class CalibrationThread(QThread):
         self.send_cmd(f"set_lux 0")
         time.sleep(2)
         a_val_0 = self.get_current_sensor_value() # 自动切换读取方式
-        self.send_cmd(f"set_lux {target_lux:.2f}")
-        time.sleep(1)
         if a_val_0 is None:
             return False, "传感器读取超时", None
-        a_val = self.get_current_sensor_value() - a_val_0 # 自动切换读取方式
+        self.log_signal.emit(f"{self.mode} 归零原始值: {a_val_0:.2f}")
+
+        self.send_cmd(f"set_lux {target_lux:.2f}")
+        time.sleep(1)
+        raw_a = self.get_current_sensor_value() # 自动切换读取方式
+        if raw_a is None:
+            return False, "传感器读取超时", None
+        a_val = raw_a - a_val_0
+        self.log_signal.emit(
+            f"{self.mode} 当前原始值: {raw_a:.2f}, 归零后实测值: {a_val:.2f}"
+        )
         self.log_signal.emit(f"set_lux {target_lux} 归零值为: {a_val:.2f}")
 
         # 打印当前 A 和 B 的状态
@@ -352,6 +363,10 @@ class CalibrationThread(QThread):
             if raw_a is not None:
                 # 减去环境底噪得到实际测量值
                 a_val_test = raw_a - a_val_0
+                self.log_signal.emit(
+                    f"{self.mode} 微调读取: set_lux={test_input:.2f}, "
+                    f"原始值={raw_a:.2f}, 归零后={a_val_test:.2f}"
+                )
 
                 # 计算实测值与当前模式理想参考值 B 的相对误差
                 # b_ref 已经在函数开头根据模式动态获取 (如 item["PD_value"])

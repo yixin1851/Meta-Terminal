@@ -238,6 +238,7 @@ class MainWindow(QMainWindow):
         self.start_port_monitor()  #  启动监听
 
         self.protocol = LineProtocol()  # 实例化协议处理器
+        self._serial_display_buffer = ""
 
         self._setup_cl500_workers()
         # self._waiting_for_echo = False
@@ -389,8 +390,10 @@ class MainWindow(QMainWindow):
         self.terminal.setTextCursor(cursor)
         self.terminal.ensureCursorVisible()
 
-    def insert_serial_stream(self, content):
-        """插入串口实时流；当前行为空时吞掉重复换行，避免显示多余空行。"""
+    _SHELL_PROMPT_ONLY_RE = re.compile(r"^\s*msh\s*/>\s*$")
+
+    def _insert_serial_text(self, content):
+        """插入串口文本；当前行为空时吞掉重复换行，避免显示多余空行。"""
         if not content:
             return
 
@@ -414,6 +417,23 @@ class MainWindow(QMainWindow):
 
         if compacted:
             self.terminal.insertPlainText("".join(compacted))
+
+    def insert_serial_stream(self, content):
+        """插入串口实时流，折叠设备返回的独立 shell 提示符行。"""
+        if not content:
+            return
+
+        self._serial_display_buffer += content
+
+        while "\n" in self._serial_display_buffer:
+            line, self._serial_display_buffer = self._serial_display_buffer.split("\n", 1)
+            if self._SHELL_PROMPT_ONLY_RE.match(line):
+                continue
+            self._insert_serial_text(line + "\n")
+
+        if len(self._serial_display_buffer) > 1024:
+            self._insert_serial_text(self._serial_display_buffer)
+            self._serial_display_buffer = ""
 
     def is_serial_open(self):
         return bool(getattr(self, "serial_worker", None) and self.serial_worker.is_open())
